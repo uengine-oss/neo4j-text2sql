@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     
     # OpenAI
     openai_api_key: str
-    openai_embedding_model: str = "text-embedding-3-large"
+    openai_embedding_model: str = "text-embedding-3-small"
     openai_llm_model: str = "gpt-4o-mini"
     
     # Target Database

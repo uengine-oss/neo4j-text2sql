@@ -17,14 +17,15 @@ Available Schema:
 Constraints and Rules:
 1. Generate ONLY a SELECT statement - no INSERT, UPDATE, DELETE, or DDL
 2. Use ONLY the tables and columns listed in the schema above
-3. Follow the suggested joins if tables need to be joined
-4. Do NOT use CTEs (WITH clauses) unless absolutely necessary
-5. Do NOT add SQL comments (-- or /* */)
-6. The query will automatically have a LIMIT applied, don't worry about it
-7. Use appropriate WHERE clauses to filter data efficiently
-8. Use indexed columns for filtering when available
-9. Prefer simple queries over complex nested subqueries
-10. Return properly formatted column aliases for clarity
+3. Always SCHEMA-QUALIFY table names and DOUBLE-QUOTE ALL identifiers exactly as shown in the schema (case-sensitive), e.g. "sample"."T02"."C01"
+4. Preserve the exact letter case of table/column names provided in the schema; do NOT lowercase identifiers
+5. Follow the suggested joins if tables need to be joined
+6. Do NOT use CTEs (WITH clauses) unless absolutely necessary
+7. Do NOT add SQL comments (-- or /* */)
+8. The query will automatically have a LIMIT applied, don't worry about it
+9. Use appropriate WHERE clauses to filter data efficiently
+10. Prefer simple queries over complex nested subqueries
+11. Return properly formatted column aliases for clarity
 
 Additional Context:
 {join_hints}

@@ -69,9 +69,7 @@ class Neo4jSchemaLoader:
             # Create table node
             query = """
             MERGE (t:Table {db: $db, schema: $schema, name: $name})
-            SET t.description = $description,
-                t.table_type = $table_type,
-                t.vector = $vector,
+            SET t.vector = $vector,
                 t.updated_at = datetime()
             RETURN t
             """
@@ -81,8 +79,6 @@ class Neo4jSchemaLoader:
                 db=db_name,
                 schema=table["schema"],
                 name=table["name"],
-                description=table.get("description", ""),
-                table_type=table.get("table_type", "BASE TABLE"),
                 vector=embedding
             )
         
@@ -113,16 +109,14 @@ class Neo4jSchemaLoader:
         
         # Load columns
         for col, embedding in zip(columns, all_embeddings):
-            fqn = f"{db_name}.{col['schema']}.{col['table_name']}.{col['name']}"
+            # fqn = f"{db_name}.{col['schema']}.{col['table_name']}.{col['name']}"
+            # Standardize FQN: schema.table.column in lowercase (no db prefix)
+            fqn = f"{col['schema']}.{col['table_name']}.{col['name']}".lower()
             
             query = """
             MATCH (t:Table {db: $db, schema: $schema, name: $table_name})
             MERGE (c:Column {fqn: $fqn})
-            SET c.name = $name,
-                c.dtype = $dtype,
-                c.nullable = $nullable,
-                c.description = $description,
-                c.vector = $vector,
+            SET c.vector = $vector,
                 c.updated_at = datetime()
             MERGE (t)-[:HAS_COLUMN]->(c)
             RETURN c
@@ -134,10 +128,6 @@ class Neo4jSchemaLoader:
                 schema=col["schema"],
                 table_name=col["table_name"],
                 fqn=fqn,
-                name=col["name"],
-                dtype=col["dtype"],
-                nullable=col["nullable"],
-                description=col.get("description", ""),
                 vector=embedding
             )
         
@@ -146,8 +136,11 @@ class Neo4jSchemaLoader:
     async def load_foreign_keys(self, foreign_keys: List[Dict[str, Any]], db_name: str = "postgres"):
         """Load foreign key relationships"""
         for fk in foreign_keys:
-            from_fqn = f"{db_name}.{fk['from_schema']}.{fk['from_table']}.{fk['from_column']}"
-            to_fqn = f"{db_name}.{fk['to_schema']}.{fk['to_table']}.{fk['to_column']}"
+            # from_fqn = f"{db_name}.{fk['from_schema']}.{fk['from_table']}.{fk['from_column']}"
+            # to_fqn = f"{db_name}.{fk['to_schema']}.{fk['to_table']}.{fk['to_column']}"
+            # Use standardized FQN (no db prefix, lowercase)
+            from_fqn = f"{fk['from_schema']}.{fk['from_table']}.{fk['from_column']}".lower()
+            to_fqn = f"{fk['to_schema']}.{fk['to_table']}.{fk['to_column']}".lower()
             
             # Column-to-column FK
             query = """
@@ -189,7 +182,9 @@ class Neo4jSchemaLoader:
     async def load_primary_keys(self, primary_keys: List[Dict[str, Any]], db_name: str = "postgres"):
         """Mark primary key columns"""
         for pk in primary_keys:
-            fqn = f"{db_name}.{pk['schema']}.{pk['table_name']}.{pk['column_name']}"
+            # fqn = f"{db_name}.{pk['schema']}.{pk['table_name']}.{pk['column_name']}"
+            # Use standardized FQN (no db prefix, lowercase)
+            fqn = f"{pk['schema']}.{pk['table_name']}.{pk['column_name']}".lower()
             
             query = """
             MATCH (c:Column {fqn: $fqn})
@@ -209,7 +204,7 @@ class Neo4jSchemaLoader:
         """Clear existing schema data for a database"""
         query = """
         MATCH (n)
-        WHERE (n:Table OR n:Column) AND n.db = $db
+        WHERE (n:Table OR n:Column) AND (n.db = $db OR n.db IS NULL)
         DETACH DELETE n
         """
         
