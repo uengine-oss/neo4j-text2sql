@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from app.config import settings
 from app.deps import neo4j_conn
 from app.routers import ask, meta, feedback, ingest
+from app.routers import vectorize
 
 
 @asynccontextmanager
@@ -63,6 +64,7 @@ app.include_router(ask.router)
 app.include_router(meta.router)
 app.include_router(feedback.router)
 app.include_router(ingest.router)
+app.include_router(vectorize.router)
 
 # Import and include schema editing router
 from app.routers import schema_edit

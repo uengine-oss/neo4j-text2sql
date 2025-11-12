@@ -70,11 +70,12 @@ async def list_tables(
     result = await neo4j_session.run(query, **params)
     records = await result.data()
     
+    # Some records may have description=None; coalesce to empty string
     return [
         TableInfo(
             name=r["name"],
             schema=r["schema"],
-            description=r.get("description", ""),
+            description=(r.get("description") or ""),
             column_count=r["column_count"]
         )
         for r in records

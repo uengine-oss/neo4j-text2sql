@@ -120,6 +120,29 @@ curl -X POST "http://localhost:8000/ingest" \
 - 임베딩 생성 (OpenAI)
 - Neo4j 그래프 생성 (노드: Table, Column / 관계: HAS_COLUMN, FK_TO)
 
+### Step 1.5: 스키마 벡터라이즈 (그래프는 그대로, 벡터만 채우기)
+
+이미 Neo4j에 그래프가 있거나 일부만 있는 경우, 벡터가 없는 노드에만 임베딩을 추가합니다. 기존 속성/관계는 변경되지 않습니다.
+
+```bash
+curl -X POST "http://localhost:8000/vectorize" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "db_name": "postgres",
+    "schema": "public",
+    "include_tables": true,
+    "include_columns": true,
+    "reembed_existing": false,
+    "batch_size": 100
+  }'
+```
+
+설명:
+- include_tables/include_columns: 테이블/컬럼 대상 선택
+- reembed_existing=false: 벡터가 없는 노드만 채움
+- reembed_existing=true: 기존 벡터도 재계산하여 덮어쓰기
+- graph topology(노드/관계)나 다른 속성은 변경/삭제하지 않음
+
 ### Step 2: 질문하기
 
 ```bash
@@ -252,7 +275,8 @@ neo4j_text2sql/
 │       ├── ask.py           # /ask 엔드포인트
 │       ├── meta.py          # /meta/* 엔드포인트
 │       ├── feedback.py      # /feedback 엔드포인트
-│       └── ingest.py        # /ingest 엔드포인트
+│       ├── ingest.py        # /ingest 엔드포인트
+│       └── vectorize.py     # /vectorize 엔드포인트
 ├── docker-compose.yml       # Neo4j 컨테이너
 ├── pyproject.toml           # UV 의존성
 └── README.md
@@ -264,6 +288,7 @@ neo4j_text2sql/
 |--------|------|------|
 | POST | `/ask` | 자연어 질의 → SQL 생성 및 실행 |
 | POST | `/ingest` | 스키마 인제스천 |
+| POST | `/vectorize` | 기존 그래프에 벡터만 채우기/재임베딩 |
 | GET | `/meta/tables` | 테이블 목록 조회 |
 | GET | `/meta/tables/{name}/columns` | 테이블 컬럼 조회 |
 | GET | `/meta/columns` | 컬럼 검색 |

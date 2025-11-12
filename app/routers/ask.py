@@ -66,6 +66,9 @@ async def ask_question(
     warnings = []
     total_start = time.time()
     
+    generated_sql: Optional[str] = None
+    validated_sql: Optional[str] = None
+
     try:
         # 1. Generate query embedding
         embed_start = time.time()
@@ -105,16 +108,30 @@ async def ask_question(
         try:
             validated_sql, _ = sql_guard.validate(generated_sql, allowed_tables=allowed_tables)
         except SQLValidationError as e:
-            raise HTTPException(status_code=400, detail=f"SQL validation failed: {str(e)}")
+            # Include generated SQL in error response
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": f"SQL validation failed: {str(e)}",
+                    "sql": generated_sql or ""
+                }
+            )
         
         # 5. Execute SQL
         sql_start = time.time()
         executor = SQLExecutor()
         
         try:
-            results = await executor.execute_query(db_conn, validated_sql)
+            results = await executor.execute_query(db_conn, validated_sql)  # type: ignore[arg-type]
         except SQLExecutionError as e:
-            raise HTTPException(status_code=500, detail=f"SQL execution failed: {str(e)}")
+            # Return the attempted SQL even on failure
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": f"SQL execution failed: {str(e)}",
+                    "sql": validated_sql or generated_sql or ""
+                }
+            )
         
         sql_ms = (time.time() - sql_start) * 1000
         
@@ -168,5 +185,12 @@ async def ask_question(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        # On unexpected errors, still include the best-known SQL
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": f"Unexpected error: {str(e)}",
+                "sql": validated_sql or generated_sql or ""
+            }
+        )
 

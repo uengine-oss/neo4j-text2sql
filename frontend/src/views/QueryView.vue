@@ -11,6 +11,15 @@
       <strong>오류:</strong> {{ queryStore.error }}
     </div>
 
+    <!-- Error SQL preview -->
+    <div v-if="queryStore.errorSql" class="sql-section" style="margin-top: 1rem;">
+      <div class="section-header">
+        <h3>실행 시도한 SQL (오류 발생)</h3>
+        <button @click="copyErrorSql" class="btn-copy">복사</button>
+      </div>
+      <pre><code>{{ queryStore.errorSql }}</code></pre>
+    </div>
+
     <div v-if="queryStore.loading" class="loading">
       <div class="spinner"></div>
       <p>SQL 생성 및 실행 중...</p>
@@ -107,6 +116,13 @@ function copySql() {
   if (queryStore.currentResponse?.sql) {
     navigator.clipboard.writeText(queryStore.currentResponse.sql)
     alert('SQL이 클립보드에 복사되었습니다!')
+  }
+}
+
+function copyErrorSql() {
+  if (queryStore.errorSql) {
+    navigator.clipboard.writeText(queryStore.errorSql)
+    alert('오류 SQL이 클립보드에 복사되었습니다!')
   }
 }
 </script>

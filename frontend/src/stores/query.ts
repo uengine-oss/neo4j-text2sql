@@ -7,6 +7,7 @@ export const useQueryStore = defineStore('query', () => {
   const currentResponse = ref<AskResponse | null>(null)
   const loading = ref(false)
   const error = ref<string | null>(null)
+  const errorSql = ref<string | null>(null)
   const history = ref<Array<{ question: string; response: AskResponse; timestamp: Date }>>([])
 
   const hasResult = computed(() => currentResponse.value !== null)
@@ -14,6 +15,7 @@ export const useQueryStore = defineStore('query', () => {
   async function ask(question: string, limit: number = 100) {
     loading.value = true
     error.value = null
+    errorSql.value = null
     currentQuestion.value = question
 
     try {
@@ -34,7 +36,13 @@ export const useQueryStore = defineStore('query', () => {
       
       return response
     } catch (err: any) {
-      error.value = err.response?.data?.detail || err.message
+      const detail = err.response?.data?.detail
+      if (detail && typeof detail === 'object') {
+        error.value = detail.message || JSON.stringify(detail)
+        errorSql.value = detail.sql || null
+      } else {
+        error.value = detail || err.message
+      }
       throw err
     } finally {
       loading.value = false
@@ -52,6 +60,7 @@ export const useQueryStore = defineStore('query', () => {
     currentResponse,
     loading,
     error,
+    errorSql,
     history,
     hasResult,
     ask,
