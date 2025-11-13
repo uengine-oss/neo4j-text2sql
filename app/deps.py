@@ -45,7 +45,7 @@ class Neo4jConnection:
         """Get Neo4j session"""
         if not self.driver:
             await self.connect()
-        return self.driver.session()
+        return self.driver.session(database=settings.neo4j_database)
 
 
 # Global instances
