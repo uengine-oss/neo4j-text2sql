@@ -169,7 +169,7 @@ async def execute(
     OPTIONAL MATCH (t)-[:HAS_COLUMN]->(c:Column)
     WITH t, c
     ORDER BY c.name
-    RETURN t.name AS table_name,
+    RETURN COALESCE(t.original_name, t.name) AS table_name,
            t.schema AS table_schema,
            t.description AS table_description,
            collect({

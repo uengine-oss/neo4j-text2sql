@@ -54,7 +54,7 @@ async def get_table_fk_relationships(
     """
     query = """
     MATCH (t:Table {name: $table_name})-[:HAS_COLUMN]->(c1:Column)-[fk:FK_TO]->(c2:Column)<-[:HAS_COLUMN]-(t2:Table)
-    RETURN DISTINCT t2.name AS related_table,
+    RETURN DISTINCT COALESCE(t2.original_name, t2.name) AS related_table,
            t2.schema AS related_table_schema,
            t2.description AS related_table_description,
            'foreign_key' AS relation_type,
@@ -62,7 +62,7 @@ async def get_table_fk_relationships(
            c1.description AS from_column_description,
            c2.name AS to_column,
            c2.description AS to_column_description
-    ORDER BY t2.name, c1.name, c2.name
+    ORDER BY related_table, c1.name, c2.name
     LIMIT $limit
     """
 
@@ -89,7 +89,7 @@ async def get_table_fk_relationships(
     if len(relationships) < limit:
         reverse_query = """
         MATCH (t2:Table)-[:HAS_COLUMN]->(c2:Column)-[fk:FK_TO]->(c1:Column)<-[:HAS_COLUMN]-(t:Table {name: $table_name})
-        RETURN DISTINCT t2.name AS related_table,
+        RETURN DISTINCT COALESCE(t2.original_name, t2.name) AS related_table,
                t2.schema AS related_table_schema,
                t2.description AS related_table_description,
                'referenced_by' AS relation_type,
@@ -97,7 +97,7 @@ async def get_table_fk_relationships(
                c1.description AS from_column_description,
                c2.name AS to_column,
                c2.description AS to_column_description
-        ORDER BY t2.name, c1.name, c2.name
+        ORDER BY related_table, c1.name, c2.name
         LIMIT $limit
         """
 
@@ -146,7 +146,7 @@ async def get_table_any_relationships(
     WHERE t1 <> t2
     WITH t2,
          collect(DISTINCT [rel IN relationships(path) | type(rel)]) AS relationship_paths
-    RETURN t2.name AS related_table,
+    RETURN COALESCE(t2.original_name, t2.name) AS related_table,
            t2.schema AS related_table_schema,
            COALESCE(t2.comment, t2.description, '설명 없음') AS related_table_description,
            [path_types IN relationship_paths |
@@ -159,7 +159,7 @@ async def get_table_any_relationships(
                    END
                )
            ] AS relationship_paths
-    ORDER BY t2.name
+    ORDER BY related_table
     LIMIT 100
     """
 
@@ -262,13 +262,13 @@ async def get_column_fk_relationships(
     """특정 컬럼의 외래키 관계를 조회한다."""
     query = """
     MATCH (t:Table {name: $table_name})-[:HAS_COLUMN]->(c1:Column {name: $column_name})-[fk:FK_TO]->(c2:Column)<-[:HAS_COLUMN]-(t2:Table)
-    RETURN t2.name AS referenced_table,
+    RETURN COALESCE(t2.original_name, t2.name) AS referenced_table,
            t2.schema AS referenced_table_schema,
            t2.description AS referenced_table_description,
            c2.name AS referenced_column,
            c2.description AS referenced_column_description,
            fk.constraint AS constraint_name
-    ORDER BY t2.name, c2.name
+    ORDER BY referenced_table, c2.name
     LIMIT $limit
     """
 

@@ -58,17 +58,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
-app.include_router(ask.router)
-app.include_router(meta.router)
-app.include_router(feedback.router)
-app.include_router(ingest.router)
-app.include_router(react.router)
-app.include_router(vectorize.router)
+# Include routers with /text2sql prefix
+app.include_router(ask.router, prefix="/text2sql")
+app.include_router(meta.router, prefix="/text2sql")
+app.include_router(feedback.router, prefix="/text2sql")
+app.include_router(ingest.router, prefix="/text2sql")
+app.include_router(react.router, prefix="/text2sql")
+app.include_router(vectorize.router, prefix="/text2sql")
 
 # Import and include schema editing router
 from app.routers import schema_edit
-app.include_router(schema_edit.router)
+app.include_router(schema_edit.router, prefix="/text2sql")
 
 
 @app.get("/")

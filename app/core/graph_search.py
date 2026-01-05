@@ -51,12 +51,12 @@ class GraphSearcher:
         query = """
         CALL db.index.vector.queryNodes('table_vec_index', $k, $embedding)
         YIELD node, score
-        RETURN node.name AS name,
+        RETURN COALESCE(node.original_name, node.name) AS name,
                node.schema AS schema,
                node.db AS db,
                node.description AS description,
                score
-        ORDER BY score DESC, node.schema ASC, node.name ASC
+        ORDER BY score DESC, node.schema ASC, name ASC
         """
         
         result = await self.session.run(query, k=k, embedding=query_embedding)
