@@ -99,6 +99,7 @@ class ReactAgent:
         user_response: Optional[str] = None,
         on_step: Optional[Callable[[ReactStep, ReactSessionState], Awaitable[None]]] = None,
         on_outcome: Optional[Callable[[AgentOutcome, ReactSessionState], Awaitable[None]]] = None,
+        on_phase: Optional[Callable[[str, int, Dict[str, Any], ReactSessionState], Awaitable[None]]] = None,
     ) -> AgentOutcome:
         """
         ReAct 루프를 돌며 툴을 실행한다.
@@ -126,9 +127,28 @@ class ReactAgent:
                 break
 
             state.iteration += 1
+            
+            # Phase: thinking - LLM 호출 시작
+            if on_phase:
+                await on_phase("thinking", state.iteration, {}, state)
+            
             input_xml = self._build_input_xml(state)
             llm_response = await self._call_llm(input_xml)
             parsed_step = self._parse_llm_response(llm_response, state.iteration)
+            
+            # Phase: reasoning - LLM 응답 파싱 완료
+            if on_phase:
+                await on_phase("reasoning", state.iteration, {
+                    "reasoning": parsed_step.reasoning,
+                    "partial_sql": parsed_step.partial_sql,
+                    "sql_completeness": {
+                        "is_complete": parsed_step.sql_completeness.is_complete,
+                        "missing_info": parsed_step.sql_completeness.missing_info,
+                        "confidence_level": parsed_step.sql_completeness.confidence_level,
+                    },
+                    "tool_name": parsed_step.tool_call.name,
+                    "tool_parameters": parsed_step.tool_call.parsed_parameters,
+                }, state)
 
             # Update metadata and partial SQL based on LLM output
             try:
@@ -200,6 +220,13 @@ class ReactAgent:
                         "Please call the explain tool first and then try again."
                     )
 
+            # Phase: acting - 도구 실행 시작
+            if on_phase:
+                await on_phase("acting", state.iteration, {
+                    "tool_name": tool_name,
+                    "tool_parameters": step.tool_call.parsed_parameters,
+                }, state)
+
             # Execute actual tool
             try:
                 tool_result = await execute_tool(
@@ -221,6 +248,14 @@ class ReactAgent:
 
             # Update step with tool result
             step.tool_result = tool_result
+            
+            # Phase: observing - 도구 실행 완료
+            if on_phase:
+                await on_phase("observing", state.iteration, {
+                    "tool_name": tool_name,
+                    "tool_result_preview": tool_result[:500] if tool_result else "",
+                }, state)
+            
             if on_step:
                 await on_step(step, state)
 
@@ -252,6 +287,20 @@ class ReactAgent:
             }
             await queue.put(payload)
 
+        async def on_phase_callback(
+            phase: str, 
+            iteration: int, 
+            data: Dict[str, Any], 
+            state_snapshot: ReactSessionState
+        ) -> None:
+            await queue.put({
+                "type": "phase",
+                "phase": phase,
+                "iteration": iteration,
+                "data": data,
+                "state": state_snapshot.to_dict(),
+            })
+
         async def runner() -> None:
             try:
                 await self.run(
@@ -261,6 +310,7 @@ class ReactAgent:
                     user_response=user_response,
                     on_step=on_step_callback,
                     on_outcome=on_outcome_callback,
+                    on_phase=on_phase_callback,
                 )
             except Exception as exc:
                 await queue.put({"type": "error", "error": exc})

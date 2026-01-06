@@ -8,6 +8,9 @@ export const useSchemaStore = defineStore('schema', () => {
   const selectedTableColumns = ref<ColumnInfo[]>([])
   const loading = ref(false)
   const error = ref<string | null>(null)
+  
+  // Cache for table columns
+  const columnsCache = ref<Record<string, ColumnInfo[]>>({})
 
   async function loadTables(search?: string, schema?: string) {
     loading.value = true
@@ -28,7 +31,10 @@ export const useSchemaStore = defineStore('schema', () => {
     error.value = null
 
     try {
-      selectedTableColumns.value = await apiService.getTableColumns(tableName, schema)
+      const columns = await apiService.getTableColumns(tableName, schema)
+      selectedTableColumns.value = columns
+      columnsCache.value[tableName] = columns
+      return columns
     } catch (err: any) {
       error.value = err.response?.data?.detail || err.message
       throw err
@@ -41,6 +47,10 @@ export const useSchemaStore = defineStore('schema', () => {
     selectedTable.value = table
     loadTableColumns(table.name, table.schema)
   }
+  
+  function getTableColumns(tableName: string): ColumnInfo[] {
+    return columnsCache.value[tableName] || []
+  }
 
   return {
     tables,
@@ -50,7 +60,8 @@ export const useSchemaStore = defineStore('schema', () => {
     error,
     loadTables,
     loadTableColumns,
-    selectTable
+    selectTable,
+    getTableColumns
   }
 })
 

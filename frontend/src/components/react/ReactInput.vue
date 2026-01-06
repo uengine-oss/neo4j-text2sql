@@ -21,6 +21,64 @@
             </div>
         </div>
 
+        <!-- 추천 쿼리 목록 -->
+        <div v-if="!waitingForUser && hasQueryHistory" class="query-suggestions">
+            <div class="suggestions-header">
+                <div class="suggestions-title">
+                    <span class="suggestions-icon">📜</span>
+                    <span>이전 쿼리</span>
+                </div>
+                <button 
+                    v-if="successfulQueries.length > 0" 
+                    class="clear-history-btn" 
+                    type="button" 
+                    @click="handleClearHistory"
+                    title="히스토리 전체 삭제"
+                >
+                    <span>🗑️</span>
+                </button>
+            </div>
+            <div class="suggestions-list">
+                <TransitionGroup name="suggestion">
+                    <button 
+                        v-for="item in displayedQueries" 
+                        :key="item.id"
+                        class="suggestion-item"
+                        :class="{ success: item.success, failed: !item.success }"
+                        type="button"
+                        @click="selectQuery(item.question)"
+                        :disabled="loading"
+                    >
+                        <span class="suggestion-status">{{ item.success ? '✓' : '✕' }}</span>
+                        <span class="suggestion-text">{{ truncateQuery(item.question) }}</span>
+                        <span class="suggestion-time">{{ formatTime(item.timestamp) }}</span>
+                        <button 
+                            class="suggestion-remove" 
+                            type="button" 
+                            @click.stop="removeQuery(item.id)"
+                            title="삭제"
+                        >×</button>
+                    </button>
+                </TransitionGroup>
+            </div>
+            <button 
+                v-if="recentQueries.length > 5 && !showAllQueries" 
+                class="show-more-queries" 
+                type="button"
+                @click="showAllQueries = true"
+            >
+                더 보기 ({{ recentQueries.length - 5 }}개)
+            </button>
+            <button 
+                v-if="showAllQueries" 
+                class="show-more-queries" 
+                type="button"
+                @click="showAllQueries = false"
+            >
+                접기
+            </button>
+        </div>
+
         <!-- 고급 설정 (쿼리 입력 시에만 표시) -->
         <div v-if="!waitingForUser" class="settings-section">
             <button class="settings-toggle" type="button" @click="showSettings = !showSettings">
@@ -81,6 +139,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useReactStore, type QueryHistoryItem } from '../../stores/react'
 
 export interface ReactStartOptions {
     maxToolCalls: number
@@ -100,9 +159,12 @@ const props = defineProps<{
     currentQuestion: string
 }>()
 
+const reactStore = useReactStore()
+
 const question = ref(props.currentQuestion ?? '')
 const userResponse = ref('')
 const showSettings = ref(false)
+const showAllQueries = ref(false)
 const maxToolCalls = ref(30)
 const maxSqlSeconds = ref(60)
 
@@ -111,6 +173,15 @@ const waitingForUser = computed(() => props.waitingForUser)
 const canSubmitQuestion = computed(() => !!question.value.trim() && !props.loading)
 const canSubmitUserResponse = computed(
     () => !!userResponse.value.trim() && !props.loading
+)
+
+// 쿼리 히스토리 관련
+const recentQueries = computed(() => reactStore.recentQueries)
+const successfulQueries = computed(() => reactStore.successfulQueries)
+const hasQueryHistory = computed(() => recentQueries.value.length > 0)
+
+const displayedQueries = computed(() => 
+    showAllQueries.value ? recentQueries.value : recentQueries.value.slice(0, 5)
 )
 
 watch(
@@ -144,6 +215,44 @@ function submitUserResponse() {
     userResponse.value = trimmed
     emit('respond', trimmed)
 }
+
+function selectQuery(queryText: string) {
+    question.value = queryText
+}
+
+function removeQuery(id: string) {
+    reactStore.removeFromHistory(id)
+}
+
+function handleClearHistory() {
+    if (confirm('모든 쿼리 히스토리를 삭제하시겠습니까?')) {
+        reactStore.clearHistory()
+    }
+}
+
+function truncateQuery(text: string): string {
+    const maxLen = 60
+    return text.length > maxLen ? text.slice(0, maxLen) + '...' : text
+}
+
+function formatTime(timestamp: number): string {
+    const now = Date.now()
+    const diff = now - timestamp
+    
+    const minutes = Math.floor(diff / 60000)
+    const hours = Math.floor(diff / 3600000)
+    const days = Math.floor(diff / 86400000)
+    
+    if (minutes < 1) return '방금 전'
+    if (minutes < 60) return `${minutes}분 전`
+    if (hours < 24) return `${hours}시간 전`
+    if (days < 7) return `${days}일 전`
+    
+    return new Date(timestamp).toLocaleDateString('ko-KR', {
+        month: 'short',
+        day: 'numeric'
+    })
+}
 </script>
 
 <style scoped>
@@ -162,9 +271,8 @@ function submitUserResponse() {
 .input-header h1 {
     margin: 0 0 0.75rem 0;
     font-size: 2.5rem;
-    color: #1a1a1a;
     font-weight: 700;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
@@ -173,7 +281,7 @@ function submitUserResponse() {
 .input-header p {
     margin: 0;
     font-size: 1rem;
-    color: #666;
+    color: rgba(255, 255, 255, 0.6);
     line-height: 1.6;
 }
 
@@ -206,26 +314,31 @@ function submitUserResponse() {
 textarea {
     flex: 1;
     padding: 1rem 1.25rem;
-    border: 2px solid #e5e7eb;
+    border: 2px solid rgba(255, 255, 255, 0.1);
     border-radius: 12px;
     font-size: 1rem;
     font-family: inherit;
     resize: none;
     height: 240px;
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    background: #fafbfc;
+    background: rgba(0, 0, 0, 0.3);
+    color: rgba(255, 255, 255, 0.9);
     line-height: 1.6;
+}
+
+textarea::placeholder {
+    color: rgba(255, 255, 255, 0.4);
 }
 
 textarea:focus {
     outline: none;
-    border-color: #667eea;
-    box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
-    background: white;
+    border-color: rgba(99, 102, 241, 0.5);
+    box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15);
+    background: rgba(0, 0, 0, 0.4);
 }
 
 textarea:disabled {
-    background: #f5f5f5;
+    background: rgba(0, 0, 0, 0.2);
     cursor: not-allowed;
     opacity: 0.7;
 }
@@ -260,7 +373,7 @@ textarea:disabled {
     justify-content: center;
     gap: 0.5rem;
     padding: 1rem 0.75rem;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
     color: white;
     border: none;
     border-radius: 12px;
@@ -268,7 +381,7 @@ textarea:disabled {
     font-weight: 600;
     cursor: pointer;
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+    box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
     position: relative;
     overflow: hidden;
     white-space: nowrap;
@@ -301,18 +414,19 @@ textarea:disabled {
 }
 
 .btn-primary:hover:not(:disabled) {
-    transform: translateX(-2px);
-    box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 25px rgba(99, 102, 241, 0.5);
 }
 
 .btn-primary:active:not(:disabled) {
-    transform: translateX(0);
+    transform: translateY(0);
 }
 
 .btn-primary:disabled {
-    background: linear-gradient(135deg, #cbd5e0 0%, #a0aec0 100%);
+    background: linear-gradient(135deg, #4a5568 0%, #2d3748 100%);
     cursor: not-allowed;
     box-shadow: none;
+    opacity: 0.6;
 }
 
 .btn-secondary {
@@ -323,9 +437,9 @@ textarea:disabled {
     justify-content: center;
     gap: 0.5rem;
     padding: 1rem 0.75rem;
-    background: white;
-    color: #4a5568;
-    border: 2px solid #e5e7eb;
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(255, 255, 255, 0.8);
+    border: 2px solid rgba(255, 255, 255, 0.15);
     border-radius: 12px;
     font-size: 0.9rem;
     font-weight: 500;
@@ -346,18 +460,18 @@ textarea:disabled {
 }
 
 .btn-secondary:hover:not(:disabled) {
-    background: #f7fafc;
-    border-color: #cbd5e0;
-    transform: translateX(-2px);
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(239, 68, 68, 0.5);
+    color: #fca5a5;
+    transform: translateY(-2px);
 }
 
 .follow-up-question {
-    background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
-    border-left: 4px solid #f59e0b;
+    background: rgba(234, 179, 8, 0.15);
+    border-left: 4px solid #eab308;
     padding: 1.25rem;
     border-radius: 12px;
-    color: #78350f;
-    box-shadow: 0 2px 8px rgba(245, 158, 11, 0.2);
+    color: #fbbf24;
 }
 
 .follow-up-question strong {
@@ -365,6 +479,7 @@ textarea:disabled {
     align-items: center;
     gap: 0.5rem;
     font-size: 1.05rem;
+    color: #fbbf24;
 }
 
 .follow-up-question strong::before {
@@ -376,7 +491,196 @@ textarea:disabled {
     margin: 0.75rem 0 0 0;
     white-space: pre-wrap;
     line-height: 1.6;
-    color: #92400e;
+    color: rgba(255, 255, 255, 0.8);
+}
+
+/* 추천 쿼리 섹션 */
+.query-suggestions {
+    margin-top: 1rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.suggestions-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    background: rgba(255, 255, 255, 0.02);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.suggestions-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.suggestions-icon {
+    font-size: 1rem;
+}
+
+.clear-history-btn {
+    padding: 0.375rem 0.5rem;
+    background: transparent;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    border-radius: 6px;
+    color: rgba(239, 68, 68, 0.7);
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.clear-history-btn:hover {
+    background: rgba(239, 68, 68, 0.1);
+    border-color: rgba(239, 68, 68, 0.5);
+    color: #fca5a5;
+}
+
+.suggestions-list {
+    display: flex;
+    flex-direction: column;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.suggestions-list::-webkit-scrollbar {
+    width: 4px;
+}
+
+.suggestions-list::-webkit-scrollbar-thumb {
+    background: rgba(99, 102, 241, 0.4);
+    border-radius: 2px;
+}
+
+.suggestion-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 0.85rem;
+    text-align: left;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.suggestion-item:last-child {
+    border-bottom: none;
+}
+
+.suggestion-item:hover:not(:disabled) {
+    background: rgba(99, 102, 241, 0.1);
+}
+
+.suggestion-item:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.suggestion-status {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    font-size: 0.7rem;
+    font-weight: 700;
+}
+
+.suggestion-item.success .suggestion-status {
+    background: rgba(34, 197, 94, 0.2);
+    color: #86efac;
+}
+
+.suggestion-item.failed .suggestion-status {
+    background: rgba(239, 68, 68, 0.2);
+    color: #fca5a5;
+}
+
+.suggestion-text {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.suggestion-time {
+    flex-shrink: 0;
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 0.75rem;
+}
+
+.suggestion-remove {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    opacity: 0;
+}
+
+.suggestion-item:hover .suggestion-remove {
+    opacity: 1;
+}
+
+.suggestion-remove:hover {
+    background: rgba(239, 68, 68, 0.2);
+    border-color: rgba(239, 68, 68, 0.5);
+    color: #fca5a5;
+}
+
+.show-more-queries {
+    width: 100%;
+    padding: 0.625rem 1rem;
+    background: rgba(99, 102, 241, 0.05);
+    border: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    color: #a5b4fc;
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.show-more-queries:hover {
+    background: rgba(99, 102, 241, 0.1);
+    color: white;
+}
+
+/* Suggestion 트랜지션 */
+.suggestion-enter-active,
+.suggestion-leave-active {
+    transition: all 0.3s ease;
+}
+
+.suggestion-enter-from {
+    opacity: 0;
+    transform: translateX(-10px);
+}
+
+.suggestion-leave-to {
+    opacity: 0;
+    transform: translateX(10px);
 }
 
 /* 고급 설정 섹션 */
@@ -390,9 +694,9 @@ textarea:disabled {
     gap: 0.5rem;
     padding: 0.6rem 1rem;
     background: transparent;
-    border: 1px dashed #cbd5e0;
+    border: 1px dashed rgba(255, 255, 255, 0.2);
     border-radius: 8px;
-    color: #718096;
+    color: rgba(255, 255, 255, 0.5);
     font-size: 0.85rem;
     cursor: pointer;
     transition: all 0.2s ease;
@@ -401,9 +705,9 @@ textarea:disabled {
 }
 
 .settings-toggle:hover {
-    background: #f7fafc;
-    border-color: #a0aec0;
-    color: #4a5568;
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.3);
+    color: rgba(255, 255, 255, 0.8);
 }
 
 .toggle-icon {
@@ -430,8 +734,8 @@ textarea:disabled {
     gap: 1rem;
     margin-top: 0.75rem;
     padding: 1.25rem;
-    background: #f8fafc;
-    border: 1px solid #e2e8f0;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 12px;
 }
 
@@ -450,12 +754,12 @@ textarea:disabled {
 .setting-label {
     font-size: 0.9rem;
     font-weight: 600;
-    color: #2d3748;
+    color: rgba(255, 255, 255, 0.9);
 }
 
 .setting-hint {
     font-size: 0.75rem;
-    color: #718096;
+    color: rgba(255, 255, 255, 0.5);
 }
 
 .setting-input-group {
@@ -467,30 +771,31 @@ textarea:disabled {
 .setting-input-group input {
     flex: 1;
     padding: 0.6rem 0.75rem;
-    border: 2px solid #e2e8f0;
+    border: 2px solid rgba(255, 255, 255, 0.1);
     border-radius: 8px;
     font-size: 0.9rem;
     font-family: inherit;
     transition: all 0.2s ease;
-    background: white;
+    background: rgba(0, 0, 0, 0.3);
+    color: white;
     max-width: 120px;
 }
 
 .setting-input-group input:focus {
     outline: none;
-    border-color: #667eea;
-    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    border-color: rgba(99, 102, 241, 0.5);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
 }
 
 .setting-input-group input:disabled {
-    background: #edf2f7;
+    background: rgba(0, 0, 0, 0.2);
     cursor: not-allowed;
     opacity: 0.6;
 }
 
 .setting-unit {
     font-size: 0.85rem;
-    color: #718096;
+    color: rgba(255, 255, 255, 0.5);
     min-width: 24px;
 }
 

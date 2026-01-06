@@ -173,6 +173,18 @@ async def run_react(
             ):
                 event_type = event["type"]
 
+                if event_type == "phase":
+                    # 중간 진행 상태 전송 (thinking, reasoning, acting, observing)
+                    payload = {
+                        "event": "phase",
+                        "phase": event["phase"],
+                        "iteration": event["iteration"],
+                        "data": event["data"],
+                        "state": event["state"],
+                    }
+                    yield json.dumps(payload, ensure_ascii=False) + "\n"
+                    continue
+
                 if event_type == "step":
                     step_model = _step_to_model(event["step"])
                     steps.append(step_model)

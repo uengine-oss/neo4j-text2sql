@@ -217,31 +217,31 @@ function copySql(sql: string) {
     display: flex;
     align-items: center;
     gap: 1rem;
-    background: white;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
     padding: 1rem 1.5rem;
     border-radius: 16px;
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
 }
 
 .nav-btn {
     flex-shrink: 0;
     width: 40px;
     height: 40px;
-    border: 2px solid #e5e7eb;
-    background: white;
+    border: 2px solid rgba(255, 255, 255, 0.15);
+    background: rgba(255, 255, 255, 0.05);
     border-radius: 10px;
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    color: #6b7280;
+    color: rgba(255, 255, 255, 0.6);
 }
 
 .nav-btn:hover:not(:disabled) {
-    border-color: #667eea;
-    background: #f0f4ff;
-    color: #667eea;
+    border-color: rgba(99, 102, 241, 0.5);
+    background: rgba(99, 102, 241, 0.15);
+    color: #a5b4fc;
     transform: scale(1.05);
 }
 
@@ -263,15 +263,15 @@ function copySql(sql: string) {
 }
 
 .step-indicators::-webkit-scrollbar-thumb {
-    background: #cbd5e0;
+    background: rgba(99, 102, 241, 0.4);
     border-radius: 2px;
 }
 
 .step-indicator {
     flex-shrink: 0;
     padding: 0.75rem 1.25rem;
-    background: #f7fafc;
-    border: 2px solid #e5e7eb;
+    background: rgba(255, 255, 255, 0.03);
+    border: 2px solid rgba(255, 255, 255, 0.1);
     border-radius: 10px;
     cursor: pointer;
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
@@ -284,18 +284,18 @@ function copySql(sql: string) {
 .step-indicator .step-number {
     font-size: 1.1rem;
     font-weight: 700;
-    color: #4a5568;
+    color: rgba(255, 255, 255, 0.8);
 }
 
 .step-indicator .step-label {
     font-size: 0.75rem;
-    color: #718096;
+    color: rgba(255, 255, 255, 0.5);
 }
 
 .step-indicator.active {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    border-color: #667eea;
-    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+    border-color: transparent;
+    box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
 }
 
 .step-indicator.active .step-number,
@@ -304,16 +304,16 @@ function copySql(sql: string) {
 }
 
 .step-indicator:hover:not(.active) {
-    border-color: #667eea;
-    background: #f0f4ff;
+    border-color: rgba(99, 102, 241, 0.5);
+    background: rgba(99, 102, 241, 0.1);
     transform: translateY(-2px);
 }
 
 /* 스텝 카드 */
 .step-card {
-    background: white;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 16px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
     padding: 2rem;
     animation: fadeIn 0.3s ease-out;
 }
@@ -324,7 +324,7 @@ function copySql(sql: string) {
     align-items: center;
     margin-bottom: 2rem;
     padding-bottom: 1.5rem;
-    border-bottom: 2px solid #f0f4ff;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .step-meta {
@@ -340,7 +340,7 @@ function copySql(sql: string) {
     margin: 0;
     font-size: 1.75rem;
     font-weight: 700;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
@@ -363,8 +363,9 @@ function copySql(sql: string) {
 
 .tool-badge {
     padding: 0.5rem 1rem;
-    background: linear-gradient(135deg, #e0e7ff 0%, #ddd6fe 100%);
-    color: #5b21b6;
+    background: rgba(99, 102, 241, 0.15);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    color: #a5b4fc;
     border-radius: 20px;
     font-size: 0.875rem;
     font-weight: 600;
@@ -380,13 +381,15 @@ function copySql(sql: string) {
 }
 
 .completeness-badge.complete {
-    background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
-    color: #065f46;
+    background: rgba(34, 197, 94, 0.15);
+    border: 1px solid rgba(34, 197, 94, 0.3);
+    color: #86efac;
 }
 
 .completeness-badge.incomplete {
-    background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
-    color: #92400e;
+    background: rgba(234, 179, 8, 0.15);
+    border: 1px solid rgba(234, 179, 8, 0.3);
+    color: #fbbf24;
 }
 
 .badge-icon {
@@ -398,7 +401,7 @@ function copySql(sql: string) {
     margin-bottom: 2rem;
     border-radius: 12px;
     overflow: hidden;
-    box-shadow: 0 0 0 2px #667eea, 0 8px 24px rgba(102, 126, 234, 0.2);
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.5), 0 8px 24px rgba(99, 102, 241, 0.2);
     animation: pulse 2s ease-in-out infinite;
 }
 
@@ -406,11 +409,11 @@ function copySql(sql: string) {
 
     0%,
     100% {
-        box-shadow: 0 0 0 2px #667eea, 0 8px 24px rgba(102, 126, 234, 0.2);
+        box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.5), 0 8px 24px rgba(99, 102, 241, 0.2);
     }
 
     50% {
-        box-shadow: 0 0 0 2px #764ba2, 0 8px 24px rgba(118, 75, 162, 0.3);
+        box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.6), 0 8px 24px rgba(139, 92, 246, 0.3);
     }
 }
 
@@ -419,7 +422,7 @@ function copySql(sql: string) {
     justify-content: space-between;
     align-items: center;
     padding: 1.25rem 1.5rem;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
 }
 
 .sql-header h3 {
@@ -453,7 +456,7 @@ function copySql(sql: string) {
 }
 
 .sql-content {
-    background: #1e1e1e;
+    background: #0d0d1a;
     padding: 1.5rem;
     max-height: 400px;
     overflow: auto;
@@ -462,31 +465,33 @@ function copySql(sql: string) {
 .sql-content pre {
     margin: 0;
     color: #d4d4d4;
-    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
     font-size: 0.95rem;
     line-height: 1.6;
     white-space: pre-wrap;
 }
 
 .sql-content code {
-    color: #9cdcfe;
+    color: #93c5fd;
 }
 
 .sql-change-indicator {
     padding: 0.75rem 1.5rem;
-    background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
-    border-top: 2px solid #fbbf24;
+    background: rgba(234, 179, 8, 0.15);
+    border-top: 1px solid rgba(234, 179, 8, 0.3);
 }
 
 .change-badge {
-    color: #92400e;
+    color: #fbbf24;
     font-weight: 600;
     font-size: 0.875rem;
 }
 
 /* 추론 섹션 */
 .reasoning-section {
-    background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+    background: rgba(234, 179, 8, 0.1);
+    border: 1px solid rgba(234, 179, 8, 0.2);
+    border-left: 3px solid #eab308;
     border-radius: 12px;
     padding: 1.5rem;
     margin-bottom: 1.5rem;
@@ -497,18 +502,18 @@ function copySql(sql: string) {
     align-items: center;
     gap: 0.75rem;
     margin: 0 0 1rem 0;
-    color: #0c4a6e;
+    color: #fbbf24;
     font-size: 1.1rem;
     font-weight: 600;
 }
 
 .reasoning-section svg {
-    color: #0284c7;
+    color: #eab308;
 }
 
 .reasoning-text {
     margin: 0;
-    color: #164e63;
+    color: rgba(255, 255, 255, 0.85);
     line-height: 1.7;
     white-space: pre-wrap;
 }
@@ -516,7 +521,7 @@ function copySql(sql: string) {
 /* 상세 정보 섹션 */
 .details-section {
     border-radius: 12px;
-    border: 2px solid #e5e7eb;
+    border: 1px solid rgba(255, 255, 255, 0.1);
     overflow: hidden;
 }
 
@@ -525,17 +530,17 @@ function copySql(sql: string) {
     align-items: center;
     gap: 0.5rem;
     padding: 1.25rem 1.5rem;
-    background: #f7fafc;
+    background: rgba(255, 255, 255, 0.02);
     cursor: pointer;
     font-weight: 600;
-    color: #4a5568;
+    color: rgba(255, 255, 255, 0.7);
     transition: all 0.3s;
     user-select: none;
 }
 
 .details-section summary:hover {
-    background: #edf2f7;
-    color: #667eea;
+    background: rgba(255, 255, 255, 0.05);
+    color: #a5b4fc;
 }
 
 .details-section summary svg {
@@ -548,7 +553,7 @@ function copySql(sql: string) {
 
 .details-content {
     padding: 1.5rem;
-    background: white;
+    background: rgba(0, 0, 0, 0.2);
     display: flex;
     flex-direction: column;
     gap: 1.5rem;
@@ -556,14 +561,14 @@ function copySql(sql: string) {
 
 .detail-block {
     padding: 1.25rem;
-    background: #f9fafb;
+    background: rgba(255, 255, 255, 0.02);
     border-radius: 8px;
-    border-left: 4px solid #667eea;
+    border-left: 4px solid #6366f1;
 }
 
 .detail-block h4 {
     margin: 0 0 1rem 0;
-    color: #1a202c;
+    color: rgba(255, 255, 255, 0.9);
     font-size: 1rem;
     font-weight: 600;
 }
@@ -583,48 +588,49 @@ function copySql(sql: string) {
 
 .info-row .label {
     font-weight: 600;
-    color: #4a5568;
+    color: rgba(255, 255, 255, 0.5);
     min-width: 80px;
 }
 
 .info-row .value {
-    color: #1a202c;
+    color: rgba(255, 255, 255, 0.9);
 }
 
 .info-row .value.code {
-    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-    background: #edf2f7;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    background: rgba(99, 102, 241, 0.15);
     padding: 0.25rem 0.5rem;
     border-radius: 4px;
     font-size: 0.875rem;
+    color: #a5b4fc;
 }
 
 .nested-details {
     margin-top: 0.75rem;
     border-radius: 8px;
-    border: 1px solid #e5e7eb;
+    border: 1px solid rgba(255, 255, 255, 0.1);
     overflow: hidden;
 }
 
 .nested-details summary {
     padding: 0.75rem 1rem;
-    background: white;
+    background: rgba(255, 255, 255, 0.02);
     cursor: pointer;
     font-weight: 500;
-    color: #667eea;
+    color: #a5b4fc;
     transition: background 0.3s;
 }
 
 .nested-details summary:hover {
-    background: #f0f4ff;
+    background: rgba(99, 102, 241, 0.1);
 }
 
 .nested-details pre {
     margin: 0;
     padding: 1rem;
-    background: #1e1e1e;
+    background: #0d0d1a;
     color: #d4d4d4;
-    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
     font-size: 0.875rem;
     line-height: 1.6;
     overflow-x: auto;
