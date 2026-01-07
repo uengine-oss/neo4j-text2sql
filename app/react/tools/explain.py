@@ -19,7 +19,8 @@ async def execute(
         explain_analysis_generator = ExplainAnalysisGenerator()
         explain_analysis_result: ExplainAnalysisResult = await explain_analysis_generator.generate(
             sql=sql,
-            db_conn=context.db_conn
+            db_conn=context.db_conn,
+            react_run_id=context.react_run_id,
         ) 
         result_parts.append(explain_analysis_result.to_xml_str())
     except (SQLValidationError, SQLExecutionError) as exc:

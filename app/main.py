@@ -1,4 +1,7 @@
 """FastAPI main application"""
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -6,7 +9,7 @@ from contextlib import asynccontextmanager
 from app.config import settings
 from app.deps import neo4j_conn
 from app.routers import ask, meta, feedback, ingest, react, vectorize
-
+from app.smart_logger import SmartLogger
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -17,7 +20,13 @@ async def lifespan(app: FastAPI):
     print(f"✓ Connected to Neo4j at {settings.neo4j_uri}")
     print(f"✓ Target database: {settings.target_db_type}://{settings.target_db_host}:{settings.target_db_port}/{settings.target_db_name}")
     print(f"✓ Using LLM: {settings.openai_llm_model}")
-    
+    SmartLogger.log(
+        "INFO",
+        "🚀 Starting Neo4j Text2SQL API...",
+        category="main.lifespan.start"
+    )
+
+
     yield
     
     # Shutdown

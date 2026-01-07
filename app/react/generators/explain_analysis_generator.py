@@ -1,6 +1,8 @@
 import json
 import logging
-from dataclasses import dataclass, field
+import time
+import traceback
+from dataclasses import dataclass, field, asdict
 from typing import Any, List, Optional
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
@@ -15,6 +17,8 @@ from app.core.sql_guard import SQLGuard, SQLValidationError
 from app.react.prompts import get_prompt_text
 from app.react.utils import XmlUtil
 from app.react.utils.db_query_builder import ExecutionPlanResult, get_query_builder, TableMetadata
+from app.react.utils.log_sanitize import sanitize_for_log
+from app.smart_logger import SmartLogger
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +56,29 @@ class ExplainAnalysisLLMResponse:
 
     @classmethod
     def from_xml(cls, xml_text: str) -> "ExplainAnalysisLLMResponse":
-        sanitized = XmlUtil.sanitize_xml_text(xml_text.strip())
+        raw = (xml_text or "").strip()
+        sanitized = XmlUtil.sanitize_xml_text(raw)
+        repaired = XmlUtil.repair_llm_xml_text(
+            sanitized,
+            text_tag_names=["note", "summary", "reason", "sql"],
+            repair_parameters_text_only=False,
+        )
+        if repaired != sanitized:
+            # Log at ERROR so it is visible under default SmartLogger thresholds.
+            SmartLogger.log(
+                "ERROR",
+                "react.explain.llm.response.repaired",
+                category="react.explain.llm.response.repaired",
+                params=sanitize_for_log(
+                    {
+                        "repaired": True,
+                        "raw_llm_text": raw,
+                        "sanitized_xml_before_repair": sanitized,
+                        "repaired_xml": repaired,
+                    }
+                ),
+            )
+            sanitized = repaired
         try:
             root = ET.fromstring(sanitized)
         except ET.ParseError as exc:
@@ -219,16 +245,45 @@ class ExplainAnalysisGenerator:
         *,
         sql: str,
         db_conn: asyncpg.Connection,
+        react_run_id: Optional[str] = None,
     ) -> ExplainAnalysisResult:
         sql_text = (sql or "").strip()
         if not sql_text:
             raise ValueError("SQL 문이 비어 있습니다.")
 
         builder = get_query_builder(self.db_type)
+        plan_started = time.perf_counter()
         execution_plan = await builder.fetch_execution_plan(db_conn, sql_text, analyze=False)
-        table_metadata = await builder.collect_table_metadata(
-            db_conn,
-            execution_plan.raw_plan,
+        plan_elapsed_ms = (time.perf_counter() - plan_started) * 1000.0
+        SmartLogger.log(
+            "INFO",
+            "react.explain.db_execution_plan",
+            category="react.explain.db_execution_plan",
+            params=sanitize_for_log(
+                {
+                    "react_run_id": react_run_id,
+                    "elapsed_ms": plan_elapsed_ms,
+                    "input_sql": sql_text,
+                    "execution_plan_raw": execution_plan.raw_plan,
+                }
+            ),
+        )
+
+        meta_started = time.perf_counter()
+        table_metadata = await builder.collect_table_metadata(db_conn, execution_plan.raw_plan)
+        meta_elapsed_ms = (time.perf_counter() - meta_started) * 1000.0
+        SmartLogger.log(
+            "INFO",
+            "react.explain.db_table_metadata",
+            category="react.explain.db_table_metadata",
+            params=sanitize_for_log(
+                {
+                    "react_run_id": react_run_id,
+                    "elapsed_ms": meta_elapsed_ms,
+                    "input_sql": sql_text,
+                    "table_metadata": [asdict(m) for m in table_metadata],
+                }
+            ),
         )
 
         prompt_input = self._build_prompt_input(
@@ -237,12 +292,13 @@ class ExplainAnalysisGenerator:
             table_metadata=table_metadata,
         )
 
-        llm_response_text = await self._call_llm(prompt_input)
+        llm_response_text = await self._call_llm(prompt_input, react_run_id=react_run_id)
         parsed_response = ExplainAnalysisLLMResponse.from_xml(llm_response_text)
 
         validation_results = await self._execute_validation_queries(
             parsed_response.validation_queries,
             db_conn=db_conn,
+            react_run_id=react_run_id,
         )
 
         return ExplainAnalysisResult(
@@ -254,28 +310,79 @@ class ExplainAnalysisGenerator:
             llm_raw_response=llm_response_text,
         )
 
-    async def _call_llm(self, input_xml: str) -> str:
+    async def _call_llm(self, input_xml: str, *, react_run_id: Optional[str] = None) -> str:
         messages = [
             SystemMessage(content=self.prompt_text),
             HumanMessage(content=input_xml),
         ]
-        response = await self.llm.ainvoke(messages)
+        SmartLogger.log(
+            "INFO",
+            "react.explain.llm.request",
+            category="react.explain.llm.request",
+            params=sanitize_for_log(
+                {
+                    "react_run_id": react_run_id,
+                    "model": getattr(self.llm, "model_name", None)
+                    or getattr(self.llm, "model", None)
+                    or settings.react_openai_llm_model,
+                    # System prompt 제외: input_xml(유저/시스템 상태 기반 입력)만 로깅
+                    "user_prompt": input_xml,
+                }
+            ),
+        )
+        llm_started = time.perf_counter()
+        try:
+            response = await self.llm.ainvoke(messages)
+        except Exception as exc:
+            llm_elapsed_ms = (time.perf_counter() - llm_started) * 1000.0
+            SmartLogger.log(
+                "ERROR",
+                "react.explain.llm.error",
+                category="react.explain.llm.error",
+                params=sanitize_for_log(
+                    {
+                        "react_run_id": react_run_id,
+                        "elapsed_ms": llm_elapsed_ms,
+                        "exception": repr(exc),
+                        "traceback": traceback.format_exc(),
+                        "user_prompt": input_xml,
+                    }
+                ),
+            )
+            raise
+        llm_elapsed_ms = (time.perf_counter() - llm_started) * 1000.0
         if isinstance(response.content, str):
-            return response.content
+            content = response.content
         if isinstance(response.content, list):
-            return "\n".join(
+            content = "\n".join(
                 part.get("text", "")
                 if isinstance(part, dict)
                 else str(part)
                 for part in response.content
             )
-        return str(response.content)
+        else:
+            content = str(response.content)
+
+        SmartLogger.log(
+            "INFO",
+            "react.explain.llm.response",
+            category="react.explain.llm.response",
+            params=sanitize_for_log(
+                {
+                    "react_run_id": react_run_id,
+                    "elapsed_ms": llm_elapsed_ms,
+                    "assistant_response": content,
+                }
+            ),
+        )
+        return content
 
     async def _execute_validation_queries(
         self,
         queries: List[ValidationQuery],
         *,
         db_conn: asyncpg.Connection,
+        react_run_id: Optional[str] = None,
     ) -> List[ValidationQueryResult]:
         if not queries:
             return []
@@ -291,6 +398,7 @@ class ExplainAnalysisGenerator:
                 guard=guard,
                 executor=executor,
                 db_conn=db_conn,
+                react_run_id=react_run_id,
             )
             results.append(result)
         return results
@@ -302,11 +410,41 @@ class ExplainAnalysisGenerator:
         guard: SQLGuard,
         executor: SQLExecutor,
         db_conn: asyncpg.Connection,
+        react_run_id: Optional[str] = None,
     ) -> ValidationQueryResult:
+        SmartLogger.log(
+            "INFO",
+            "react.explain.validation.request",
+            category="react.explain.validation.request",
+            params=sanitize_for_log(
+                {
+                    "react_run_id": react_run_id,
+                    "query_id": query.query_id,
+                    "reason": query.reason,
+                    "sql": query.sql,
+                }
+            ),
+        )
+        started = time.perf_counter()
         try:
             validated_sql, _ = guard.validate(query.sql)
             execution_result = await executor.execute_query(db_conn, validated_sql)
             formatted = SQLExecutor.format_results_for_json(execution_result)
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            SmartLogger.log(
+                "INFO",
+                "react.explain.validation.response",
+                category="react.explain.validation.response",
+                params=sanitize_for_log(
+                    {
+                        "react_run_id": react_run_id,
+                        "query_id": query.query_id,
+                        "elapsed_ms": elapsed_ms,
+                        "validated_sql": validated_sql,
+                        "result": formatted,
+                    }
+                ),
+            )
             return ValidationQueryResult(
                 query=query,
                 success=True,
@@ -316,6 +454,22 @@ class ExplainAnalysisGenerator:
                 rows=formatted["rows"],
             )
         except (SQLValidationError, SQLExecutionError) as exc:
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            SmartLogger.log(
+                "ERROR",
+                "react.explain.validation.error",
+                category="react.explain.validation.error",
+                params=sanitize_for_log(
+                    {
+                        "react_run_id": react_run_id,
+                        "query_id": query.query_id,
+                        "elapsed_ms": elapsed_ms,
+                        "sql": query.sql,
+                        "exception": repr(exc),
+                        "traceback": traceback.format_exc(),
+                    }
+                ),
+            )
             logger.warning(
                 "검증 쿼리 실행 실패 (%s): %s", query.query_id, exc, exc_info=True
             )
@@ -325,6 +479,22 @@ class ExplainAnalysisGenerator:
                 error_message=str(exc),
             )
         except Exception as exc:  # pragma: no cover - defensive
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            SmartLogger.log(
+                "ERROR",
+                "react.explain.validation.error",
+                category="react.explain.validation.error",
+                params=sanitize_for_log(
+                    {
+                        "react_run_id": react_run_id,
+                        "query_id": query.query_id,
+                        "elapsed_ms": elapsed_ms,
+                        "sql": query.sql,
+                        "exception": repr(exc),
+                        "traceback": traceback.format_exc(),
+                    }
+                ),
+            )
             logger.exception("검증 쿼리 실행 중 알 수 없는 오류 발생")
             return ValidationQueryResult(
                 query=query,

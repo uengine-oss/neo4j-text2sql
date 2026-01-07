@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import time
+import traceback
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -15,6 +18,8 @@ from app.core.sql_guard import SQLGuard, SQLValidationError
 from app.react.agent import AgentOutcome, ReactAgent, ReactStep
 from app.react.state import ReactSessionState
 from app.react.tools import ToolContext
+from app.react.utils.log_sanitize import sanitize_for_log
+from app.smart_logger import SmartLogger
 
 
 router = APIRouter(prefix="/react", tags=["ReAct"])
@@ -22,6 +27,10 @@ router = APIRouter(prefix="/react", tags=["ReAct"])
 
 def _to_cdata(value: str) -> str:
     return f"<![CDATA[{value}]]>"
+
+
+def _new_react_run_id() -> str:
+    return f"react_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
 
 
 class SQLCompletenessModel(BaseModel):
@@ -149,18 +158,34 @@ async def run_react(
     db_conn=Depends(get_db_connection),
     openai_client=Depends(get_openai_client),
 ) -> StreamingResponse:
+    react_run_id = _new_react_run_id()
+    api_started = time.perf_counter()
     state = _ensure_state_from_request(request)
 
     tool_context = ToolContext(
         neo4j_session=neo4j_session,
         db_conn=db_conn,
         openai_client=openai_client,
+        react_run_id=react_run_id,
         max_sql_seconds=state.max_sql_seconds,
     )
 
     agent = ReactAgent()
     warnings: List[str] = []
     steps: List[ReactStepModel] = []
+
+    SmartLogger.log(
+        "INFO",
+        "react.api.request",
+        category="react.api.request",
+        params=sanitize_for_log(
+            {
+                "react_run_id": react_run_id,
+                "request": request.model_dump(),
+                "state_snapshot": state.to_dict(),
+            }
+        ),
+    )
 
     async def event_iterator():
         nonlocal warnings
@@ -170,6 +195,7 @@ async def run_react(
                 tool_context=tool_context,
                 max_iterations=request.max_iterations,
                 user_response=request.user_response,
+                react_run_id=react_run_id,
             ):
                 event_type = event["type"]
 
@@ -220,6 +246,19 @@ async def run_react(
                             question_to_user=question,
                             warnings=None,
                         )
+                        SmartLogger.log(
+                            "INFO",
+                            "react.api.step_confirmation",
+                            category="react.api.step_confirmation",
+                            params=sanitize_for_log(
+                                {
+                                    "react_run_id": react_run_id,
+                                    "elapsed_ms": (time.perf_counter() - api_started) * 1000.0,
+                                    "response": response_payload.model_dump(),
+                                    "state_snapshot": state_snapshot.to_dict(),
+                                }
+                            ),
+                        )
                         confirmation_payload = {
                             "event": "step_confirmation",
                             "response": response_payload.model_dump(),
@@ -251,6 +290,19 @@ async def run_react(
                             question_to_user=question,
                             warnings=None,
                         )
+                        SmartLogger.log(
+                            "INFO",
+                            "react.api.needs_user_input",
+                            category="react.api.needs_user_input",
+                            params=sanitize_for_log(
+                                {
+                                    "react_run_id": react_run_id,
+                                    "elapsed_ms": (time.perf_counter() - api_started) * 1000.0,
+                                    "response": response_payload.model_dump(),
+                                    "state_snapshot": state.to_dict(),
+                                }
+                            ),
+                        )
                         payload = {
                             "event": "needs_user_input",
                             "response": response_payload.model_dump(),
@@ -260,6 +312,20 @@ async def run_react(
                         return
 
                     if outcome.status != "submit_sql":
+                        SmartLogger.log(
+                            "ERROR",
+                            "react.api.error",
+                            category="react.api.error",
+                            params=sanitize_for_log(
+                                {
+                                    "react_run_id": react_run_id,
+                                    "elapsed_ms": (time.perf_counter() - api_started) * 1000.0,
+                                    "message": "Agent did not complete with submit_sql.",
+                                    "outcome_status": outcome.status,
+                                    "state_snapshot": state.to_dict(),
+                                }
+                            ),
+                        )
                         error_payload = {
                             "event": "error",
                             "message": "Agent did not complete with submit_sql.",
@@ -285,6 +351,21 @@ async def run_react(
                     try:
                         validated_sql, _ = guard.validate(final_sql)
                     except SQLValidationError as exc:
+                        SmartLogger.log(
+                            "ERROR",
+                            "react.api.error",
+                            category="react.api.error",
+                            params=sanitize_for_log(
+                                {
+                                    "react_run_id": react_run_id,
+                                    "elapsed_ms": (time.perf_counter() - api_started) * 1000.0,
+                                    "message": f"SQL validation failed: {exc}",
+                                    "final_sql": final_sql,
+                                    "state_snapshot": state.to_dict(),
+                                    "traceback": traceback.format_exc(),
+                                }
+                            ),
+                        )
                         error_payload = {
                             "event": "error",
                             "message": f"SQL validation failed: {exc}",
@@ -320,6 +401,19 @@ async def run_react(
                         question_to_user=None,
                         warnings=warnings or None,
                     )
+                    SmartLogger.log(
+                        "INFO",
+                        "react.api.completed",
+                        category="react.api.completed",
+                        params=sanitize_for_log(
+                            {
+                                "react_run_id": react_run_id,
+                                "elapsed_ms": (time.perf_counter() - api_started) * 1000.0,
+                                "response": response_payload.model_dump(),
+                                "state_snapshot": state.to_dict(),
+                            }
+                        ),
+                    )
                     payload = {
                         "event": "completed",
                         "response": response_payload.model_dump(),
@@ -330,10 +424,38 @@ async def run_react(
 
                 if event_type == "error":
                     message = str(event["error"])
+                    SmartLogger.log(
+                        "ERROR",
+                        "react.api.error",
+                        category="react.api.error",
+                        params=sanitize_for_log(
+                            {
+                                "react_run_id": react_run_id,
+                                "elapsed_ms": (time.perf_counter() - api_started) * 1000.0,
+                                "message": message,
+                                "state_snapshot": state.to_dict(),
+                            }
+                        ),
+                    )
                     payload = {"event": "error", "message": message}
                     yield json.dumps(payload, ensure_ascii=False) + "\n"
                     return
         except Exception as exc:
+            SmartLogger.log(
+                "ERROR",
+                "react.api.error",
+                category="react.api.error",
+                params=sanitize_for_log(
+                    {
+                        "react_run_id": react_run_id,
+                        "elapsed_ms": (time.perf_counter() - api_started) * 1000.0,
+                        "exception": repr(exc),
+                        "traceback": traceback.format_exc(),
+                        "request": request.model_dump(),
+                        "state_snapshot": state.to_dict(),
+                    }
+                ),
+            )
             payload = {"event": "error", "message": str(exc)}
             yield json.dumps(payload, ensure_ascii=False) + "\n"
 

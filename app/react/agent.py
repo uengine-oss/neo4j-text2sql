@@ -1,6 +1,9 @@
 import ast
 import asyncio
 import contextlib
+import time
+import traceback
+import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +28,8 @@ from app.react.state import ReactMetadata, ReactSessionState, MetadataParseError
 from app.react.tools import ToolContext, ToolExecutionError, execute_tool
 from app.react.utils import XmlUtil
 from app.react.prompts import get_prompt_text
+from app.react.utils.log_sanitize import sanitize_for_log
+from app.smart_logger import SmartLogger
 
 
 class ReactAgentError(Exception):
@@ -81,6 +86,50 @@ def _to_cdata(value: str) -> str:
     return f"<![CDATA[{value}]]>"
 
 
+def _new_react_run_id() -> str:
+    # Keep it short-but-unique for correlation across logs.
+    return f"react_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+
+
+def _extract_first_output_xml(xml_text: str) -> Dict[str, Any]:
+    """
+    Extract the first <output>...</output> block from a potentially noisy LLM response.
+
+    LLMs sometimes append markdown fences or extra tool-call markup after the closing </output>.
+    This helper trims the payload to a single, well-formed XML document for robust parsing.
+    """
+    text = (xml_text or "").strip()
+    start = text.find("<output")
+    if start < 0:
+        return {"xml": text, "trimmed": False, "start": -1, "end": -1}
+
+    # Find the matching </output> for the first <output ...> considering nested <output> blocks.
+    import re
+
+    tag_iter = re.finditer(r"</?output\b", text[start:])
+    depth = 0
+    end_inclusive = -1
+    for m in tag_iter:
+        is_close = m.group(0).startswith("</")
+        if not is_close:
+            depth += 1
+            continue
+        depth -= 1
+        if depth <= 0:
+            # We matched the closing tag for the first output block.
+            end_inclusive = start + m.start() + len("</output>")
+            break
+
+    if end_inclusive < 0:
+        extracted = text[start:]
+        trimmed = start > 0
+        return {"xml": extracted, "trimmed": trimmed, "start": start, "end": -1}
+
+    extracted = text[start:end_inclusive]
+    trimmed = start > 0 or end_inclusive < len(text)
+    return {"xml": extracted, "trimmed": trimmed, "start": start, "end": end_inclusive}
+
+
 class ReactAgent:
     def __init__(self):
         self.prompt_text = get_prompt_text("react_prompt.xml")
@@ -91,12 +140,89 @@ class ReactAgent:
             reasoning_effort="medium"
         )
 
+    async def _call_llm_xml_reprint(
+        self,
+        raw_llm_text: str,
+        *,
+        react_run_id: Optional[str] = None,
+        iteration: Optional[int] = None,
+    ) -> str:
+        """
+        One-shot repair: ask the LLM to reprint ONLY valid XML (no extra text).
+        Used when parsing still fails even after local best-effort repairs.
+        """
+        system_prompt = (
+            "You are a strict XML formatter.\n"
+            "You will receive text that was supposed to be a single valid XML document.\n"
+            "Return ONLY the corrected XML.\n"
+            "- Output must be a single <output>...</output> document.\n"
+            "- Do NOT include markdown fences or any text outside XML.\n"
+            "- Do NOT output a <note> element.\n"
+            "- For any free-text fields, NEVER output raw '<' or '&' characters.\n"
+            "  If you must include them, use CDATA or escape as &lt; &gt; &amp;.\n"
+        )
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(
+                content=(
+                    "Fix the following content into a valid <output> XML only:\n\n"
+                    f"{raw_llm_text}"
+                )
+            ),
+        ]
+        SmartLogger.log(
+            "ERROR",
+            "react.llm.reprint.request",
+            category="react.llm.reprint.request",
+            params=sanitize_for_log(
+                {
+                    "react_run_id": react_run_id,
+                    "iteration": iteration,
+                    "phase": "thinking",
+                    "model": getattr(self.llm, "model_name", None)
+                    or getattr(self.llm, "model", None)
+                    or settings.react_openai_llm_model,
+                    "raw_llm_text": raw_llm_text,
+                }
+            ),
+        )
+        started = time.perf_counter()
+        response = await self.llm.ainvoke(messages)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+        if isinstance(response.content, str):
+            content = response.content
+        elif isinstance(response.content, list):
+            content = "\n".join(
+                part["text"] if isinstance(part, dict) and "text" in part else str(part)
+                for part in response.content
+            )
+        else:
+            content = str(response.content)
+
+        SmartLogger.log(
+            "ERROR",
+            "react.llm.reprint.response",
+            category="react.llm.reprint.response",
+            params=sanitize_for_log(
+                {
+                    "react_run_id": react_run_id,
+                    "iteration": iteration,
+                    "phase": "thinking",
+                    "elapsed_ms": elapsed_ms,
+                    "assistant_response": content,
+                }
+            ),
+        )
+        return content
+
     async def run(
         self,
         state: ReactSessionState,
         tool_context: ToolContext,
         max_iterations: Optional[int] = None,
         user_response: Optional[str] = None,
+        react_run_id: Optional[str] = None,
         on_step: Optional[Callable[[ReactStep, ReactSessionState], Awaitable[None]]] = None,
         on_outcome: Optional[Callable[[AgentOutcome, ReactSessionState], Awaitable[None]]] = None,
         on_phase: Optional[Callable[[str, int, Dict[str, Any], ReactSessionState], Awaitable[None]]] = None,
@@ -105,6 +231,13 @@ class ReactAgent:
         ReAct 루프를 돌며 툴을 실행한다.
         user_response 가 주어지면 가장 최근 tool_result 로 전달한다.
         """
+        run_id = react_run_id or _new_react_run_id()
+        last_input_xml: Optional[str] = None
+        last_llm_response: Optional[str] = None
+        last_tool_name: Optional[str] = None
+        last_tool_parameters: Optional[Dict[str, Any]] = None
+        last_tool_result: Optional[str] = None
+
         if user_response:
             parts = ["<tool_result>"]
             if state.pending_agent_question:
@@ -119,147 +252,335 @@ class ReactAgent:
         steps: List[ReactStep] = []
         iteration_limit = max_iterations or (state.remaining_tool_calls + 10)
 
-        for _ in range(iteration_limit):
-            if state.remaining_tool_calls <= 0:
-                raise ReactAgentError("No remaining tool calls.")
+        SmartLogger.log(
+            "INFO",
+            "react.run.start",
+            category="react.run.start",
+            params=sanitize_for_log(
+                {
+                    "react_run_id": run_id,
+                    "iteration_limit": iteration_limit,
+                    "max_iterations": max_iterations,
+                    "user_response": user_response,
+                    "state_snapshot": state.to_dict(),
+                }
+            ),
+        )
 
-            if max_iterations and len(steps) >= max_iterations:
-                break
+        try:
+            for _ in range(iteration_limit):
+                if state.remaining_tool_calls <= 0:
+                    raise ReactAgentError("No remaining tool calls.")
 
-            state.iteration += 1
+                if max_iterations and len(steps) >= max_iterations:
+                    break
+
+                state.iteration += 1
             
-            # Phase: thinking - LLM 호출 시작
-            if on_phase:
-                await on_phase("thinking", state.iteration, {}, state)
+                # Phase: thinking - LLM 호출 시작
+                if on_phase:
+                    await on_phase("thinking", state.iteration, {}, state)
             
-            input_xml = self._build_input_xml(state)
-            llm_response = await self._call_llm(input_xml)
-            parsed_step = self._parse_llm_response(llm_response, state.iteration)
-            
-            # Phase: reasoning - LLM 응답 파싱 완료
-            if on_phase:
-                await on_phase("reasoning", state.iteration, {
-                    "reasoning": parsed_step.reasoning,
-                    "partial_sql": parsed_step.partial_sql,
-                    "sql_completeness": {
-                        "is_complete": parsed_step.sql_completeness.is_complete,
-                        "missing_info": parsed_step.sql_completeness.missing_info,
-                        "confidence_level": parsed_step.sql_completeness.confidence_level,
-                    },
-                    "tool_name": parsed_step.tool_call.name,
-                    "tool_parameters": parsed_step.tool_call.parsed_parameters,
-                }, state)
+                input_xml = self._build_input_xml(state)
+                last_input_xml = input_xml
 
-            # Update metadata and partial SQL based on LLM output
-            try:
-                state.metadata.update_from_xml(parsed_step.metadata_xml)
-            except MetadataParseError as exc:
-                raise ReactAgentError(str(exc)) from exc
-            auto_enrich_tables_from_reasoning(parsed_step.reasoning, state)
-
-            state.partial_sql = parsed_step.partial_sql or state.partial_sql
-            state.add_previous_reasoning(
-                step=parsed_step.iteration,
-                reasoning=parsed_step.reasoning,
-                limit=settings.previous_reasoning_limit_steps,
-            )
-
-            # Defer tool result assignment; handle by tool execution
-            step = parsed_step
-            steps.append(step)
-
-            tool_name = step.tool_call.name
-
-            if tool_name == "submit_sql":
-                sql_text = step.tool_call.parsed_parameters.get("sql", "")
-                is_last_call = state.remaining_tool_calls <= 1
-                sql_not_explained = not state.is_sql_explained(sql_text)
-                
-                # remaining_tool_calls > 1일 때만 explain 검증
-                if not is_last_call and sql_not_explained:
-                    raise SQLNotExplainedError(
-                        "Before calling submit_sql, you must first validate the SQL with the explain tool. "
-                        "Please call the explain tool first and then try again."
-                    )
-                
-                outcome = AgentOutcome(
-                    status="submit_sql",
-                    steps=steps,
-                    final_sql=sql_text,
-                    metadata=state.metadata,
-                    was_last_call_submission=is_last_call,
-                    sql_not_explained=sql_not_explained,
+                llm_response = await self._call_llm(
+                    input_xml,
+                    react_run_id=run_id,
+                    iteration=state.iteration,
                 )
-                if on_step:
-                    await on_step(step, state)
-                if on_outcome:
-                    await on_outcome(outcome, state)
-                return outcome
+                last_llm_response = llm_response
 
-            if tool_name == "ask_user":
-                question = step.tool_call.parsed_parameters.get("question", "")
+                try:
+                    parsed_step = self._parse_llm_response(
+                        llm_response,
+                        state.iteration,
+                        react_run_id=run_id,
+                        state_snapshot=state.to_dict(),
+                    )
+                except Exception as parse_exc:
+                    # F3: ask LLM to reprint XML once, then re-parse.
+                    SmartLogger.log(
+                        "ERROR",
+                        "react.llm.parse_retry",
+                        category="react.llm.parse_retry",
+                        params=sanitize_for_log(
+                            {
+                                "react_run_id": run_id,
+                                "iteration": state.iteration,
+                                "exception": repr(parse_exc),
+                                "traceback": traceback.format_exc(),
+                                "assistant_response_raw": llm_response,
+                            }
+                        ),
+                    )
+                    reprinted = await self._call_llm_xml_reprint(
+                        llm_response,
+                        react_run_id=run_id,
+                        iteration=state.iteration,
+                    )
+                    last_llm_response = reprinted
+                    parsed_step = self._parse_llm_response(
+                        reprinted,
+                        state.iteration,
+                        react_run_id=run_id,
+                        state_snapshot=state.to_dict(),
+                    )
+            
+                # Phase: reasoning - LLM 응답 파싱 완료
+                if on_phase:
+                    await on_phase(
+                        "reasoning",
+                        state.iteration,
+                        {
+                            "reasoning": parsed_step.reasoning,
+                            "partial_sql": parsed_step.partial_sql,
+                            "sql_completeness": {
+                                "is_complete": parsed_step.sql_completeness.is_complete,
+                                "missing_info": parsed_step.sql_completeness.missing_info,
+                                "confidence_level": parsed_step.sql_completeness.confidence_level,
+                            },
+                            "tool_name": parsed_step.tool_call.name,
+                            "tool_parameters": parsed_step.tool_call.parsed_parameters,
+                        },
+                        state,
+                    )
+
+                # Update metadata and partial SQL based on LLM output
+                try:
+                    state.metadata.update_from_xml(parsed_step.metadata_xml)
+                except MetadataParseError as exc:
+                    raise ReactAgentError(str(exc)) from exc
+                auto_enrich_tables_from_reasoning(parsed_step.reasoning, state)
+
+                state.partial_sql = parsed_step.partial_sql or state.partial_sql
+                state.add_previous_reasoning(
+                    step=parsed_step.iteration,
+                    reasoning=parsed_step.reasoning,
+                    limit=settings.previous_reasoning_limit_steps,
+                )
+
+                # Defer tool result assignment; handle by tool execution
+                step = parsed_step
+                steps.append(step)
+
+                tool_name = step.tool_call.name
+
+                if tool_name == "submit_sql":
+                    sql_text = step.tool_call.parsed_parameters.get("sql", "")
+                    is_last_call = state.remaining_tool_calls <= 1
+                    sql_not_explained = not state.is_sql_explained(sql_text)
+                
+                    # remaining_tool_calls > 1일 때만 explain 검증
+                    if not is_last_call and sql_not_explained:
+                        raise SQLNotExplainedError(
+                            "Before calling submit_sql, you must first validate the SQL with the explain tool. "
+                            "Please call the explain tool first and then try again."
+                        )
+                
+                    outcome = AgentOutcome(
+                        status="submit_sql",
+                        steps=steps,
+                        final_sql=sql_text,
+                        metadata=state.metadata,
+                        was_last_call_submission=is_last_call,
+                        sql_not_explained=sql_not_explained,
+                    )
+                    if on_step:
+                        await on_step(step, state)
+                    if on_outcome:
+                        await on_outcome(outcome, state)
+                    SmartLogger.log(
+                        "INFO",
+                        "react.run.done",
+                        category="react.run.done",
+                        params=sanitize_for_log(
+                            {
+                                "react_run_id": run_id,
+                                "status": outcome.status,
+                                "steps_count": len(steps),
+                                "state_snapshot": state.to_dict(),
+                            }
+                        ),
+                    )
+                    return outcome
+
+                if tool_name == "ask_user":
+                    question = step.tool_call.parsed_parameters.get("question", "")
+                    state.remaining_tool_calls -= 1
+                    outcome = AgentOutcome(
+                        status="ask_user",
+                        steps=steps,
+                        metadata=state.metadata,
+                        question_to_user=question,
+                    )
+                    if on_step:
+                        await on_step(step, state)
+                    if on_outcome:
+                        await on_outcome(outcome, state)
+                    SmartLogger.log(
+                        "INFO",
+                        "react.run.done",
+                        category="react.run.done",
+                        params=sanitize_for_log(
+                            {
+                                "react_run_id": run_id,
+                                "status": outcome.status,
+                                "steps_count": len(steps),
+                                "question_to_user": question,
+                                "state_snapshot": state.to_dict(),
+                            }
+                        ),
+                    )
+                    return outcome
+
+                # execute_sql_preview는 반드시 explain이 선행되어야 함
+                if tool_name == "execute_sql_preview":
+                    sql_text = step.tool_call.parsed_parameters.get("sql", "")
+                    if not state.is_sql_explained(sql_text):
+                        raise SQLNotExplainedError(
+                            "Before calling execute_sql_preview, you must first validate the SQL with the explain tool. "
+                            "Please call the explain tool first and then try again."
+                        )
+
+                # Phase: acting - 도구 실행 시작
+                if on_phase:
+                    await on_phase(
+                        "acting",
+                        state.iteration,
+                        {
+                            "tool_name": tool_name,
+                            "tool_parameters": step.tool_call.parsed_parameters,
+                        },
+                        state,
+                    )
+
+                # Execute actual tool (log request/response + elapsed_ms)
+                last_tool_name = tool_name
+                last_tool_parameters = step.tool_call.parsed_parameters
+                SmartLogger.log(
+                    "INFO",
+                    "react.tool.request",
+                    category="react.tool.request",
+                    params=sanitize_for_log(
+                        {
+                            "react_run_id": run_id,
+                            "iteration": state.iteration,
+                            "phase": "acting",
+                            "tool_name": tool_name,
+                            "tool_parameters": step.tool_call.parsed_parameters,
+                        }
+                    ),
+                )
+                tool_started = time.perf_counter()
+                try:
+                    tool_result = await execute_tool(
+                        tool_name=tool_name,
+                        context=tool_context,
+                        parameters=step.tool_call.parsed_parameters,
+                    )
+                except ToolExecutionError as exc:
+                    SmartLogger.log(
+                        "ERROR",
+                        "react.tool.error",
+                        category="react.tool.error",
+                        params=sanitize_for_log(
+                            {
+                                "react_run_id": run_id,
+                                "iteration": state.iteration,
+                                "tool_name": tool_name,
+                                "tool_parameters": step.tool_call.parsed_parameters,
+                                "exception": repr(exc),
+                                "traceback": traceback.format_exc(),
+                                "state_snapshot": state.to_dict(),
+                            }
+                        ),
+                    )
+                    raise ReactAgentError(str(exc)) from exc
+                except Exception as exc:
+                    SmartLogger.log(
+                        "ERROR",
+                        "react.tool.error",
+                        category="react.tool.error",
+                        params=sanitize_for_log(
+                            {
+                                "react_run_id": run_id,
+                                "iteration": state.iteration,
+                                "tool_name": tool_name,
+                                "tool_parameters": step.tool_call.parsed_parameters,
+                                "exception": repr(exc),
+                                "traceback": traceback.format_exc(),
+                                "state_snapshot": state.to_dict(),
+                            }
+                        ),
+                    )
+                    raise
+                tool_elapsed_ms = (time.perf_counter() - tool_started) * 1000.0
+                last_tool_result = tool_result
+                SmartLogger.log(
+                    "INFO",
+                    "react.tool.response",
+                    category="react.tool.response",
+                    params=sanitize_for_log(
+                        {
+                            "react_run_id": run_id,
+                            "iteration": state.iteration,
+                            "phase": "observing",
+                            "tool_name": tool_name,
+                            "elapsed_ms": tool_elapsed_ms,
+                            "tool_result": tool_result,
+                        }
+                    ),
+                )
+            
+                # explain 호출 시 SQL을 추적
+                if tool_name == "explain":
+                    sql_text = step.tool_call.parsed_parameters.get("sql", "")
+                    if sql_text:
+                        state.add_explained_sql(sql_text)
+            
+                state.current_tool_result = tool_result
                 state.remaining_tool_calls -= 1
-                outcome = AgentOutcome(
-                    status="ask_user",
-                    steps=steps,
-                    metadata=state.metadata,
-                    question_to_user=question,
-                )
+
+                # Update step with tool result
+                step.tool_result = tool_result
+            
+                # Phase: observing - 도구 실행 완료
+                if on_phase:
+                    await on_phase(
+                        "observing",
+                        state.iteration,
+                        {
+                            "tool_name": tool_name,
+                            "tool_result_preview": tool_result[:500] if tool_result else "",
+                        },
+                        state,
+                    )
+            
                 if on_step:
                     await on_step(step, state)
-                if on_outcome:
-                    await on_outcome(outcome, state)
-                return outcome
 
-            # execute_sql_preview는 반드시 explain이 선행되어야 함
-            if tool_name == "execute_sql_preview":
-                sql_text = step.tool_call.parsed_parameters.get("sql", "")
-                if not state.is_sql_explained(sql_text):
-                    raise SQLNotExplainedError(
-                        "Before calling execute_sql_preview, you must first validate the SQL with the explain tool. "
-                        "Please call the explain tool first and then try again."
-                    )
-
-            # Phase: acting - 도구 실행 시작
-            if on_phase:
-                await on_phase("acting", state.iteration, {
-                    "tool_name": tool_name,
-                    "tool_parameters": step.tool_call.parsed_parameters,
-                }, state)
-
-            # Execute actual tool
-            try:
-                tool_result = await execute_tool(
-                    tool_name=tool_name,
-                    context=tool_context,
-                    parameters=step.tool_call.parsed_parameters,
-                )
-            except ToolExecutionError as exc:
-                raise ReactAgentError(str(exc)) from exc
-            
-            # explain 호출 시 SQL을 추적
-            if tool_name == "explain":
-                sql_text = step.tool_call.parsed_parameters.get("sql", "")
-                if sql_text:
-                    state.add_explained_sql(sql_text)
-            
-            state.current_tool_result = tool_result
-            state.remaining_tool_calls -= 1
-
-            # Update step with tool result
-            step.tool_result = tool_result
-            
-            # Phase: observing - 도구 실행 완료
-            if on_phase:
-                await on_phase("observing", state.iteration, {
-                    "tool_name": tool_name,
-                    "tool_result_preview": tool_result[:500] if tool_result else "",
-                }, state)
-            
-            if on_step:
-                await on_step(step, state)
-
-        raise ReactAgentError("Iteration limit reached without completion.")
+            raise ReactAgentError("Iteration limit reached without completion.")
+        except Exception as exc:
+            SmartLogger.log(
+                "ERROR",
+                "react.run.error",
+                category="react.run.error",
+                params=sanitize_for_log(
+                    {
+                        "react_run_id": run_id,
+                        "exception": repr(exc),
+                        "traceback": traceback.format_exc(),
+                        "state_snapshot": state.to_dict(),
+                        "last_input_xml": last_input_xml,
+                        "last_llm_response": last_llm_response,
+                        "last_tool_name": last_tool_name,
+                        "last_tool_parameters": last_tool_parameters,
+                        "last_tool_result": last_tool_result,
+                    }
+                ),
+            )
+            raise
 
     async def stream(
         self,
@@ -267,6 +588,7 @@ class ReactAgent:
         tool_context: ToolContext,
         max_iterations: Optional[int] = None,
         user_response: Optional[str] = None,
+        react_run_id: Optional[str] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         queue: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue()
 
@@ -308,6 +630,7 @@ class ReactAgent:
                     tool_context=tool_context,
                     max_iterations=max_iterations,
                     user_response=user_response,
+                    react_run_id=react_run_id,
                     on_step=on_step_callback,
                     on_outcome=on_outcome_callback,
                     on_phase=on_phase_callback,
@@ -365,80 +688,246 @@ class ReactAgent:
         parts.append("</input>")
         return "\n".join(parts)
 
-    async def _call_llm(self, input_xml: str) -> str:
+    async def _call_llm(
+        self,
+        input_xml: str,
+        *,
+        react_run_id: Optional[str] = None,
+        iteration: Optional[int] = None,
+    ) -> str:
         messages = [
             SystemMessage(content=self.prompt_text),
             HumanMessage(content=input_xml),
         ]
-        response = await self.llm.ainvoke(messages)
+        SmartLogger.log(
+            "INFO",
+            "react.llm.request",
+            category="react.llm.request",
+            params=sanitize_for_log(
+                {
+                    "react_run_id": react_run_id,
+                    "iteration": iteration,
+                    "phase": "thinking",
+                    "model": getattr(self.llm, "model_name", None)
+                    or getattr(self.llm, "model", None)
+                    or settings.react_openai_llm_model,
+                    # System prompt 제외: user가 전달되는 입력(XML)만 로깅
+                    "user_prompt": input_xml,
+                }
+            ),
+        )
+        llm_started = time.perf_counter()
+        try:
+            response = await self.llm.ainvoke(messages)
+        except Exception as exc:
+            llm_elapsed_ms = (time.perf_counter() - llm_started) * 1000.0
+            SmartLogger.log(
+                "ERROR",
+                "react.llm.error",
+                category="react.llm.error",
+                params=sanitize_for_log(
+                    {
+                        "react_run_id": react_run_id,
+                        "iteration": iteration,
+                        "phase": "thinking",
+                        "elapsed_ms": llm_elapsed_ms,
+                        "exception": repr(exc),
+                        "traceback": traceback.format_exc(),
+                        "user_prompt": input_xml,
+                    }
+                ),
+            )
+            raise
+        llm_elapsed_ms = (time.perf_counter() - llm_started) * 1000.0
         if settings.is_add_delay_after_react_generator:
+            delay_started = time.perf_counter()
             await asyncio.sleep(settings.delay_after_react_generator_seconds)
+            delay_elapsed_ms = (time.perf_counter() - delay_started) * 1000.0
+            SmartLogger.log(
+                "INFO",
+                "react.llm.post_delay",
+                category="react.llm.post_delay",
+                params=sanitize_for_log(
+                    {
+                        "react_run_id": react_run_id,
+                        "iteration": iteration,
+                        "elapsed_ms": delay_elapsed_ms,
+                        "delay_seconds": settings.delay_after_react_generator_seconds,
+                    }
+                ),
+            )
 
         if isinstance(response.content, str):
-            return response.content
-        if isinstance(response.content, list):
-            return "\n".join(
+            content = response.content
+        elif isinstance(response.content, list):
+            content = "\n".join(
                 part["text"] if isinstance(part, dict) and "text" in part else str(part)
                 for part in response.content
             )
-        return str(response.content)
+        else:
+            content = str(response.content)
 
-    def _parse_llm_response(self, response_text: str, iteration: int) -> ReactStep:
+        SmartLogger.log(
+            "INFO",
+            "react.llm.response",
+            category="react.llm.response",
+            params=sanitize_for_log(
+                {
+                    "react_run_id": react_run_id,
+                    "iteration": iteration,
+                    "phase": "thinking",
+                    "elapsed_ms": llm_elapsed_ms,
+                    "assistant_response": content,
+                }
+            ),
+        )
+        return content
+
+    def _parse_llm_response(
+        self,
+        response_text: str,
+        iteration: int,
+        *,
+        react_run_id: Optional[str] = None,
+        state_snapshot: Optional[Dict[str, Any]] = None,
+    ) -> ReactStep:
         cleaned = response_text.strip()
         start_idx = cleaned.find("<")
         if start_idx > 0:
             cleaned = cleaned[start_idx:]
 
         cleaned = XmlUtil.sanitize_xml_text(cleaned)
-        root = self._parse_xml_with_recovery(cleaned, response_text)
-
-        reasoning = (root.findtext("reasoning") or "").strip()
-        metadata_el = root.find("collected_metadata")
-        if metadata_el is None:
-            raise LLMResponseFormatError("Missing <collected_metadata> section.")
-        metadata_xml = ET.tostring(metadata_el, encoding="unicode")
-
-        partial_sql = (root.findtext("partial_sql") or "").strip()
-
-        sql_check_el = root.find("sql_completeness_check")
-        if sql_check_el is None:
-            raise LLMResponseFormatError("Missing <sql_completeness_check> section.")
-
-        is_complete_text = (sql_check_el.findtext("is_complete") or "").strip().lower()
-        is_complete = is_complete_text == "true"
-        missing_info = (sql_check_el.findtext("missing_info") or "").strip()
-        confidence_level = (sql_check_el.findtext("confidence_level") or "").strip()
-        completeness = SQLCompleteness(
-            is_complete=is_complete,
-            missing_info=missing_info,
-            confidence_level=confidence_level,
+        extract_info = _extract_first_output_xml(cleaned)
+        if extract_info.get("trimmed"):
+            start = int(extract_info.get("start") or 0)
+            end = int(extract_info.get("end") or 0)
+            SmartLogger.log(
+                "WARNING",
+                "react.llm.response.trimmed",
+                category="react.llm.response.trimmed",
+                params=sanitize_for_log(
+                    {
+                        "react_run_id": react_run_id,
+                        "iteration": iteration,
+                        "original_len": len(cleaned),
+                        "extracted_len": len(extract_info.get("xml") or ""),
+                        "trim_prefix_len": start if start > 0 else 0,
+                        "trim_suffix_len": (len(cleaned) - end) if end > 0 else 0,
+                        "trim_suffix_preview": (cleaned[end : end + 200] if end > 0 else ""),
+                    }
+                ),
+            )
+        cleaned = str(extract_info.get("xml") or cleaned)
+        extracted_before_repair = cleaned
+        repaired = XmlUtil.repair_llm_xml_text(
+            cleaned,
+            text_tag_names=["note", "reasoning", "missing_info", "partial_sql"],
+            repair_parameters_text_only=True,
         )
+        if repaired != cleaned:
+            # Log at ERROR so it's visible under default SmartLogger thresholds.
+            SmartLogger.log(
+                "ERROR",
+                "react.llm.response.repaired",
+                category="react.llm.response.repaired",
+                params=sanitize_for_log(
+                    {
+                        "react_run_id": react_run_id,
+                        "iteration": iteration,
+                        "assistant_response_raw": response_text,
+                        "extracted_xml_before_repair": extracted_before_repair,
+                        "repaired_xml": repaired,
+                    }
+                ),
+            )
+            cleaned = repaired
+        try:
+            root = self._parse_xml_with_recovery(cleaned, response_text)
 
-        tool_call_el = root.find("tool_call")
-        if tool_call_el is None:
-            raise LLMResponseFormatError("Missing <tool_call> section.")
+            # Recovery wrapper may produce nested <output><output>...</output></output>.
+            # If key sections are missing, unwrap to the inner output for best-effort parsing.
+            if root.find("collected_metadata") is None:
+                inner_output = root.find("output")
+                if inner_output is not None:
+                    SmartLogger.log(
+                        "WARNING",
+                        "react.llm.response.nested_output_unwrapped",
+                        category="react.llm.response.nested_output_unwrapped",
+                        params=sanitize_for_log(
+                            {
+                                "react_run_id": react_run_id,
+                                "iteration": iteration,
+                            }
+                        ),
+                    )
+                    root = inner_output
 
-        tool_name = (tool_call_el.findtext("tool_name") or "").strip()
-        parameters_el = tool_call_el.find("parameters")
-        if not tool_name or parameters_el is None:
-            raise LLMResponseFormatError("Invalid tool_call structure.")
+            reasoning = (root.findtext("reasoning") or "").strip()
+            metadata_el = root.find("collected_metadata")
+            if metadata_el is None:
+                raise LLMResponseFormatError("Missing <collected_metadata> section.")
+            metadata_xml = ET.tostring(metadata_el, encoding="unicode")
 
-        raw_parameters_xml = ET.tostring(parameters_el, encoding="unicode")
-        parsed_parameters = self._parse_tool_parameters(tool_name, parameters_el)
+            partial_sql = (root.findtext("partial_sql") or "").strip()
 
-        return ReactStep(
-            iteration=iteration,
-            reasoning=reasoning,
-            metadata_xml=metadata_xml,
-            partial_sql=partial_sql,
-            sql_completeness=completeness,
-            tool_call=ToolCall(
-                name=tool_name,
-                raw_parameters_xml=raw_parameters_xml,
-                parsed_parameters=parsed_parameters,
-            ),
-            llm_output=response_text,
-        )
+            sql_check_el = root.find("sql_completeness_check")
+            if sql_check_el is None:
+                raise LLMResponseFormatError("Missing <sql_completeness_check> section.")
+
+            is_complete_text = (sql_check_el.findtext("is_complete") or "").strip().lower()
+            is_complete = is_complete_text == "true"
+            missing_info = (sql_check_el.findtext("missing_info") or "").strip()
+            confidence_level = (sql_check_el.findtext("confidence_level") or "").strip()
+            completeness = SQLCompleteness(
+                is_complete=is_complete,
+                missing_info=missing_info,
+                confidence_level=confidence_level,
+            )
+
+            tool_call_el = root.find("tool_call")
+            if tool_call_el is None:
+                raise LLMResponseFormatError("Missing <tool_call> section.")
+
+            tool_name = (tool_call_el.findtext("tool_name") or "").strip()
+            parameters_el = tool_call_el.find("parameters")
+            if not tool_name or parameters_el is None:
+                raise LLMResponseFormatError("Invalid tool_call structure.")
+
+            raw_parameters_xml = ET.tostring(parameters_el, encoding="unicode")
+            parsed_parameters = self._parse_tool_parameters(tool_name, parameters_el)
+
+            return ReactStep(
+                iteration=iteration,
+                reasoning=reasoning,
+                metadata_xml=metadata_xml,
+                partial_sql=partial_sql,
+                sql_completeness=completeness,
+                tool_call=ToolCall(
+                    name=tool_name,
+                    raw_parameters_xml=raw_parameters_xml,
+                    parsed_parameters=parsed_parameters,
+                ),
+                llm_output=response_text,
+            )
+        except Exception as exc:
+            SmartLogger.log(
+                "ERROR",
+                "react.llm.parse_error",
+                category="react.llm.parse_error",
+                params=sanitize_for_log(
+                    {
+                        "react_run_id": react_run_id,
+                        "iteration": iteration,
+                        "assistant_response_raw": response_text,
+                        "sanitized_xml": cleaned,
+                        "extracted_xml_before_repair": extracted_before_repair,
+                        "exception": repr(exc),
+                        "traceback": traceback.format_exc(),
+                        "state_snapshot": state_snapshot,
+                    }
+                ),
+            )
+            raise
 
     def _parse_tool_parameters(
         self,

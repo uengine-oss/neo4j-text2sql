@@ -18,6 +18,9 @@ class ToolContext:
     db_conn: asyncpg.Connection
     openai_client: AsyncOpenAI
 
+    # ReAct 요청 단위 상관관계(correlation)용. (라우터/에이전트가 설정)
+    react_run_id: Optional[str] = None
+
     table_top_k: int = 20
     table_relation_limit: int = 20
     column_relation_limit: int = 10
@@ -54,6 +57,7 @@ class ToolContext:
             neo4j_session=self.neo4j_session,
             db_conn=self.db_conn,
             openai_client=self.openai_client,
+            react_run_id=self.react_run_id,
             table_top_k=table_top_k or self.table_top_k,
             table_relation_limit=table_relation_limit or self.table_relation_limit,
             column_relation_limit=column_relation_limit or self.column_relation_limit,

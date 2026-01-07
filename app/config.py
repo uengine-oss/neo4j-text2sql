@@ -61,6 +61,16 @@ class Settings(BaseSettings):
     is_add_mocked_db_caution: bool = False
     explain_analysis_timeout_seconds: int = 10
     
+    # SmartLogger (SMART_LOGGER_*)
+    smart_logger_main_log_path: str = "logs/app_flow.jsonl"
+    smart_logger_detail_log_dir: str = "logs/details"
+    smart_logger_min_level: str = "ERROR"
+    smart_logger_include_all_min_level: str = "ERROR"
+    smart_logger_console_output: bool = True
+    smart_logger_file_output: bool = False
+    smart_logger_remove_log_on_create: bool = False
+    smart_logger_blacklist_messages: str = "[]"
+
     class Config:
         env_file = ".env"
         case_sensitive = False
