@@ -2,27 +2,11 @@
 ║          Neo4j Text2SQL - 실행 중인 서비스                    ║
 ╚══════════════════════════════════════════════════════════════╝
 
-⭐ 통합 접속 (권장):
-   🌐 http://localhost:9090
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 개별 서비스:
 
-🌉 Gateway (Spring Cloud)
-   http://localhost:9090
-   - Frontend + Backend 통합
-   - CORS 처리
-   - 라우팅: / → Frontend, /api → Backend
-
-🎨 Frontend (Vue 3)
-   http://localhost:3000
-   - 질의 화면: 자연어 입력 → SQL → 결과 → 차트
-   - 스키마 화면: 테이블 탐색 + ER Diagram
-
 🔧 Backend (FastAPI)
-   http://localhost:8001
-   - API 문서: http://localhost:8001/docs
+   http://localhost:8000
+   - API 문서: http://localhost:8000/docs
    - 자연어 → SQL 변환
    - Neo4j RAG
    - SQL 검증 및 실행
@@ -48,10 +32,5 @@
   전체 종료:  ./stop-all.sh
   상태 확인:  cat SERVICES.txt
   헬스체크:  curl http://localhost:9090/api/health
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🎉 모든 서비스가 정상 작동 중입니다!
-   지금 바로 http://localhost:9090 에서 사용하세요!
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

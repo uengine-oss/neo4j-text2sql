@@ -20,39 +20,3 @@ API_PID=$!
 sleep 5
 echo "   ✅ Backend API started (PID: $API_PID)"
 echo ""
-
-# 3. Frontend (Vue.js)
-echo "3️⃣ Starting Frontend (port 3000)..."
-cd /Users/uengine/neo4j_text2sql/frontend
-npm run dev > frontend.log 2>&1 &
-FRONTEND_PID=$!
-sleep 3
-echo "   ✅ Frontend started (PID: $FRONTEND_PID)"
-echo ""
-
-# 4. Gateway (Spring Cloud)
-echo "4️⃣ Starting Gateway (port 9090)..."
-cd /Users/uengine/neo4j_text2sql/gateway
-./mvnw spring-boot:run > gateway.log 2>&1 &
-GATEWAY_PID=$!
-echo "   ✅ Gateway starting... (PID: $GATEWAY_PID)"
-echo ""
-
-echo "======================================"
-echo "🎉 All services started!"
-echo "======================================"
-echo ""
-echo "📍 Access URLs:"
-echo "   🌐 Gateway (통합):  http://localhost:9090"
-echo "   🎨 Frontend:        http://localhost:3000"
-echo "   🔧 Backend API:     http://localhost:8001"
-echo "   🗄️  Neo4j Browser:  http://localhost:7474"
-echo ""
-echo "📋 Logs:"
-echo "   Backend:  tail -f api.log"
-echo "   Frontend: tail -f frontend/frontend.log"
-echo "   Gateway:  tail -f gateway/gateway.log"
-echo ""
-echo "🛑 Stop all: ./stop-all.sh"
-echo ""
-

@@ -5,25 +5,13 @@
 echo "🛑 Stopping Neo4j Text2SQL System..."
 echo ""
 
-# 1. Gateway
-echo "1️⃣ Stopping Gateway..."
-pkill -f "spring-boot:run"
-sleep 2
-echo "   ✅ Gateway stopped"
-
-# 2. Frontend
-echo "2️⃣ Stopping Frontend..."
-pkill -f "vite"
-sleep 2
-echo "   ✅ Frontend stopped"
-
-# 3. Backend API
+# 1. Backend API
 echo "3️⃣ Stopping Backend API..."
 lsof -i :8001 | grep LISTEN | awk '{print $2}' | xargs kill -9 2>/dev/null
 sleep 2
 echo "   ✅ Backend API stopped"
 
-# 4. Docker (optional)
+# 2. Docker (optional)
 read -p "4️⃣ Stop Docker services? (y/N): " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]
