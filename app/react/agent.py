@@ -227,6 +227,7 @@ class ReactAgent:
         on_step: Optional[Callable[[ReactStep, ReactSessionState], Awaitable[None]]] = None,
         on_outcome: Optional[Callable[[AgentOutcome, ReactSessionState], Awaitable[None]]] = None,
         on_phase: Optional[Callable[[str, int, Dict[str, Any], ReactSessionState], Awaitable[None]]] = None,
+        on_token: Optional[Callable[[int, str], Awaitable[None]]] = None,
     ) -> AgentOutcome:
         """
         ReAct 루프를 돌며 툴을 실행한다.
@@ -311,11 +312,20 @@ class ReactAgent:
                 llm_started = time.perf_counter()
                 llm_response: Optional[str] = None
                 try:
-                    llm_response = await self._call_llm(
-                        input_xml,
-                        react_run_id=run_id,
-                        iteration=state.iteration,
-                    )
+                    if on_token:
+                        # 스트리밍 LLM 호출 (토큰 단위로 콜백)
+                        llm_response = await self._call_llm_streaming(
+                            input_xml,
+                            on_token=on_token,
+                            iteration=state.iteration,
+                            react_run_id=run_id,
+                        )
+                    else:
+                        llm_response = await self._call_llm(
+                            input_xml,
+                            react_run_id=run_id,
+                            iteration=state.iteration,
+                        )
                     last_llm_response = llm_response
                 finally:
                     llm_elapsed_ms = (time.perf_counter() - llm_started) * 1000.0
@@ -719,6 +729,13 @@ class ReactAgent:
                 "state": state_snapshot.to_dict(),
             })
 
+        async def on_token_callback(iteration: int, token: str) -> None:
+            await queue.put({
+                "type": "token",
+                "iteration": iteration,
+                "token": token,
+            })
+
         async def runner() -> None:
             try:
                 await self.run(
@@ -731,6 +748,7 @@ class ReactAgent:
                     on_step=on_step_callback,
                     on_outcome=on_outcome_callback,
                     on_phase=on_phase_callback,
+                    on_token=on_token_callback,
                 )
             except Exception as exc:
                 await queue.put({"type": "error", "error": exc})
@@ -879,6 +897,75 @@ class ReactAgent:
             ),
         )
         return content
+
+    async def _call_llm_streaming(
+        self,
+        input_xml: str,
+        *,
+        on_token: Callable[[int, str], Awaitable[None]],
+        iteration: int,
+        react_run_id: Optional[str] = None,
+    ) -> str:
+        """LLM을 스트리밍 모드로 호출하여 토큰 단위로 콜백합니다."""
+        messages = [
+            SystemMessage(content=self.prompt_text),
+            HumanMessage(content=input_xml),
+        ]
+        SmartLogger.log(
+            "INFO",
+            "react.llm.request.streaming",
+            category="react.llm.request.streaming",
+            params=sanitize_for_log(
+                {
+                    "react_run_id": react_run_id,
+                    "iteration": iteration,
+                    "phase": "thinking",
+                    "model": getattr(self.llm, "model_name", None)
+                    or getattr(self.llm, "model", None)
+                    or settings.react_openai_llm_model,
+                }
+            ),
+        )
+        
+        full_content = ""
+        try:
+            async for chunk in self.llm.astream(messages):
+                if hasattr(chunk, 'content') and chunk.content:
+                    token = chunk.content
+                    full_content += token
+                    await on_token(iteration, token)
+        except Exception as exc:
+            SmartLogger.log(
+                "ERROR",
+                "react.llm.streaming.error",
+                category="react.llm.streaming.error",
+                params=sanitize_for_log(
+                    {
+                        "react_run_id": react_run_id,
+                        "iteration": iteration,
+                        "exception": repr(exc),
+                        "traceback": traceback.format_exc(),
+                    }
+                ),
+            )
+            raise
+        
+        if settings.is_add_delay_after_react_generator:
+            await asyncio.sleep(settings.delay_after_react_generator_seconds)
+        
+        SmartLogger.log(
+            "INFO",
+            "react.llm.response.streaming",
+            category="react.llm.response.streaming",
+            params=sanitize_for_log(
+                {
+                    "react_run_id": react_run_id,
+                    "iteration": iteration,
+                    "total_length": len(full_content),
+                }
+            ),
+        )
+        return full_content
 
     def _parse_llm_response(
         self,

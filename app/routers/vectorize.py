@@ -123,13 +123,25 @@ async def vectorize_graph(
             )
             cols: List[Dict[str, Any]] = [record.data() async for record in result_c]
 
-            # Build texts using description ONLY for columns
-            texts: List[str] = [(item.get("description") or "") for item in cols]
+            # Build texts using table_name.column_name and description
+            texts: List[str] = []
+            for item in cols:
+                text = embedding_client.format_column_text(
+                    column_name=item.get("column_name", ""),
+                    table_name=item.get("table_name", ""),
+                    dtype="",  # dtype not available in this query
+                    description=item.get("description") or "",
+                )
+                texts.append(text)
 
             batch_size = max(1, int(request.batch_size))
             embeddings: List[List[float]] = []
             for i in range(0, len(texts), batch_size):
                 batch = texts[i:i + batch_size]
+                # Filter out empty texts
+                if not any(batch):
+                    embeddings.extend([[0.0] * 1536] * len(batch))
+                    continue
                 vecs = await embedding_client.embed_batch(batch)
                 embeddings.extend(vecs)
 
