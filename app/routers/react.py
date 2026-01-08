@@ -18,6 +18,7 @@ from app.core.sql_guard import SQLGuard, SQLValidationError
 from app.react.agent import AgentOutcome, ReactAgent, ReactStep
 from app.react.state import ReactSessionState
 from app.react.tools import ToolContext
+from app.react.streaming_xml_sections import StreamingXmlSectionsExtractor
 from app.react.utils.log_sanitize import sanitize_for_log
 from app.smart_logger import SmartLogger
 
@@ -97,6 +98,9 @@ class ReactRequest(BaseModel):
     prefer_language: str = Field(
         default="ko", description="사용자 선호 언어 코드(ko, en, ja, zh 등). 기본값: ko"
     )
+    debug_stream_xml_tokens: bool = Field(
+        default=False, description="디버그용: raw XML 토큰 스트림을 그대로 전송할지 여부"
+    )
 
 
 def _step_to_model(step: ReactStep) -> ReactStepModel:
@@ -173,6 +177,7 @@ async def run_react(
     agent = ReactAgent()
     warnings: List[str] = []
     steps: List[ReactStepModel] = []
+    extractor = StreamingXmlSectionsExtractor(throttle_ms=50)
 
     SmartLogger.log(
         "INFO",
@@ -201,17 +206,39 @@ async def run_react(
                 event_type = event["type"]
 
                 if event_type == "token":
-                    # LLM 토큰 스트리밍
+                    # Always feed token chunks to the extractor.
+                    extractor.feed(iteration=int(event["iteration"]), token=str(event["token"]))
+
+                    # Flush batched user-facing deltas (50ms throttled).
+                    for out_event in extractor.flush_if_due(force=False):
+                        yield json.dumps(out_event, ensure_ascii=False) + "\n"
+
+                    # Optional debug: raw XML token streaming
+                    if request.debug_stream_xml_tokens:
+                        payload = {
+                            "event": "token",
+                            "iteration": event["iteration"],
+                            "token": event["token"],
+                        }
+                        yield json.dumps(payload, ensure_ascii=False) + "\n"
+                    continue
+
+                if event_type == "format_repair":
+                    # Ensure any pending deltas flush before showing repair banner
+                    for out_event in extractor.flush_if_due(force=True):
+                        yield json.dumps(out_event, ensure_ascii=False) + "\n"
                     payload = {
-                        "event": "token",
-                        "iteration": event["iteration"],
-                        "token": event["token"],
+                        "event": "format_repair",
+                        "iteration": event.get("iteration"),
+                        "reason": event.get("reason") or "parse_retry",
                     }
                     yield json.dumps(payload, ensure_ascii=False) + "\n"
                     continue
 
                 if event_type == "phase":
                     # 중간 진행 상태 전송 (thinking, reasoning, acting, observing)
+                    for out_event in extractor.flush_if_due(force=True):
+                        yield json.dumps(out_event, ensure_ascii=False) + "\n"
                     payload = {
                         "event": "phase",
                         "phase": event["phase"],
@@ -223,6 +250,8 @@ async def run_react(
                     continue
 
                 if event_type == "step":
+                    for out_event in extractor.flush_if_due(force=True):
+                        yield json.dumps(out_event, ensure_ascii=False) + "\n"
                     step_model = _step_to_model(event["step"])
                     steps.append(step_model)
                     payload = {
@@ -280,6 +309,8 @@ async def run_react(
                     continue
 
                 if event_type == "outcome":
+                    for out_event in extractor.flush_if_due(force=True):
+                        yield json.dumps(out_event, ensure_ascii=False) + "\n"
                     outcome: AgentOutcome = event["outcome"]
 
                     if outcome.status == "ask_user":
@@ -434,6 +465,8 @@ async def run_react(
                     return
 
                 if event_type == "error":
+                    for out_event in extractor.flush_if_due(force=True):
+                        yield json.dumps(out_event, ensure_ascii=False) + "\n"
                     message = str(event["error"])
                     SmartLogger.log(
                         "ERROR",
@@ -469,5 +502,8 @@ async def run_react(
             )
             payload = {"event": "error", "message": str(exc)}
             yield json.dumps(payload, ensure_ascii=False) + "\n"
+        # Normal termination: ensure last buffered deltas are emitted.
+        for out_event in extractor.flush_if_due(force=True):
+            yield json.dumps(out_event, ensure_ascii=False) + "\n"
 
     return StreamingResponse(event_iterator(), media_type="application/x-ndjson")

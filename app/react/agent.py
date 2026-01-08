@@ -222,6 +222,7 @@ class ReactAgent:
         on_outcome: Optional[Callable[[AgentOutcome, ReactSessionState], Awaitable[None]]] = None,
         on_phase: Optional[Callable[[str, int, Dict[str, Any], ReactSessionState], Awaitable[None]]] = None,
         on_token: Optional[Callable[[int, str], Awaitable[None]]] = None,
+        on_format_repair: Optional[Callable[[int, str], Awaitable[None]]] = None,
     ) -> AgentOutcome:
         """
         ReAct 루프를 돌며 툴을 실행한다.
@@ -336,6 +337,9 @@ class ReactAgent:
                         state_snapshot=state.to_dict(),
                     )
                 except Exception as parse_exc:
+                    # Notify stream consumer that we are about to perform a format repair (LLM reprint).
+                    if on_format_repair:
+                        await on_format_repair(state.iteration, "parse_retry")
                     # F3: ask LLM to reprint XML once, then re-parse.
                     SmartLogger.log(
                         "ERROR",
@@ -761,6 +765,13 @@ class ReactAgent:
                 "token": token,
             })
 
+        async def on_format_repair_callback(iteration: int, reason: str) -> None:
+            await queue.put({
+                "type": "format_repair",
+                "iteration": iteration,
+                "reason": reason,
+            })
+
         async def runner() -> None:
             try:
                 await self.run(
@@ -774,6 +785,7 @@ class ReactAgent:
                     on_outcome=on_outcome_callback,
                     on_phase=on_phase_callback,
                     on_token=on_token_callback,
+                    on_format_repair=on_format_repair_callback,
                 )
             except Exception as exc:
                 await queue.put({"type": "error", "error": exc})
