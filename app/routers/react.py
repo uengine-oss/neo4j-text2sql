@@ -223,6 +223,18 @@ async def run_react(
                         yield json.dumps(payload, ensure_ascii=False) + "\n"
                     continue
 
+                if event_type == "thinking_token":
+                    # Gemini thinking chunks are user-facing as "exploring" section.
+                    # NOTE: Intentionally no throttling/sanitization per product requirement.
+                    payload = {
+                        "event": "section_delta",
+                        "iteration": event.get("iteration"),
+                        "section": "exploring",
+                        "delta": event.get("token") or "",
+                    }
+                    yield json.dumps(payload, ensure_ascii=False) + "\n"
+                    continue
+
                 if event_type == "format_repair":
                     # Ensure any pending deltas flush before showing repair banner
                     for out_event in extractor.flush_if_due(force=True):

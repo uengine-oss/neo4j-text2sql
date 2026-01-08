@@ -207,7 +207,7 @@ def _maybe_rewrite_tool_call_for_policy(
 class ReactAgent:
     def __init__(self):
         self.prompt_text = get_prompt_text("react_prompt.xml")
-        self.llm = create_react_llm()
+        self.llm = create_react_llm(thinking_level="medium")
 
     async def _call_llm_xml_reprint(
         self,
@@ -296,6 +296,7 @@ class ReactAgent:
         on_outcome: Optional[Callable[[AgentOutcome, ReactSessionState], Awaitable[None]]] = None,
         on_phase: Optional[Callable[[str, int, Dict[str, Any], ReactSessionState], Awaitable[None]]] = None,
         on_token: Optional[Callable[[int, str], Awaitable[None]]] = None,
+        on_thinking: Optional[Callable[[int, str], Awaitable[None]]] = None,
         on_format_repair: Optional[Callable[[int, str], Awaitable[None]]] = None,
     ) -> AgentOutcome:
         """
@@ -386,6 +387,7 @@ class ReactAgent:
                         llm_response = await self._call_llm_streaming(
                             input_xml,
                             on_token=on_token,
+                            on_thinking=on_thinking,
                             iteration=state.iteration,
                             react_run_id=run_id,
                         )
@@ -883,6 +885,13 @@ class ReactAgent:
                 "token": token,
             })
 
+        async def on_thinking_callback(iteration: int, token: str) -> None:
+            await queue.put({
+                "type": "thinking_token",
+                "iteration": iteration,
+                "token": token,
+            })
+
         async def on_format_repair_callback(iteration: int, reason: str) -> None:
             await queue.put({
                 "type": "format_repair",
@@ -903,6 +912,7 @@ class ReactAgent:
                     on_outcome=on_outcome_callback,
                     on_phase=on_phase_callback,
                     on_token=on_token_callback,
+                    on_thinking=on_thinking_callback,
                     on_format_repair=on_format_repair_callback,
                 )
             except Exception as exc:
@@ -1056,6 +1066,7 @@ class ReactAgent:
         input_xml: str,
         *,
         on_token: Callable[[int, str], Awaitable[None]],
+        on_thinking: Optional[Callable[[int, str], Awaitable[None]]] = None,
         iteration: int,
         react_run_id: Optional[str] = None,
     ) -> str:
@@ -1079,37 +1090,58 @@ class ReactAgent:
             ),
         )
         
-        def _coerce_chunk_content_to_text(content: Any) -> str:
+        def _extract_text_and_thinking_parts(content: Any) -> tuple[str, List[str]]:
             """
-            Normalize streaming chunk content into text.
-            Some providers (e.g., Gemini via LangChain) may emit content as a list of dict parts like:
-              [{'type': 'text', 'text': '...'}]
+            Extract streaming 'text' parts (XML) and 'thinking' parts (model internal thoughts)
+            separately to avoid contaminating the XML buffer.
+            Gemini via LangChain may emit:
+              [{'type': 'thinking', 'thinking': '...'}, {'type': 'text', 'text': '<output>...'}]
             """
             if content is None:
-                return ""
+                return "", []
             if isinstance(content, str):
-                return content
+                return content, []
+            if isinstance(content, dict):
+                if "thinking" in content and str(content.get("thinking") or "").strip():
+                    return "", [str(content.get("thinking") or "")]
+                if "text" in content and str(content.get("text") or ""):
+                    return str(content.get("text") or ""), []
+                return "", []
             if isinstance(content, list):
-                out: List[str] = []
+                text_out: List[str] = []
+                thinking_out: List[str] = []
                 for part in content:
-                    if isinstance(part, dict) and "text" in part:
-                        out.append(str(part.get("text") or ""))
-                    else:
-                        out.append(str(part))
-                return "".join(out)
-            if isinstance(content, dict) and "text" in content:
-                return str(content.get("text") or "")
-            return str(content)
+                    if isinstance(part, dict):
+                        ptype = str(part.get("type") or "").lower()
+                        if ptype == "thinking" and str(part.get("thinking") or "").strip():
+                            thinking_out.append(str(part.get("thinking") or ""))
+                            continue
+                        if "thinking" in part and str(part.get("thinking") or "").strip():
+                            thinking_out.append(str(part.get("thinking") or ""))
+                            continue
+                        if "text" in part and str(part.get("text") or ""):
+                            text_out.append(str(part.get("text") or ""))
+                            continue
+                        # Ignore unknown dict parts to keep XML clean
+                        continue
+                    if isinstance(part, str) and part:
+                        text_out.append(part)
+                return "".join(text_out), thinking_out
+            # Unknown type: don't risk polluting XML
+            return "", []
 
         full_content_parts: List[str] = []
         try:
             async for chunk in self.llm.astream(messages):
                 if hasattr(chunk, 'content') and chunk.content:
-                    token_text = _coerce_chunk_content_to_text(chunk.content)
-                    if not token_text:
-                        continue
-                    full_content_parts.append(token_text)
-                    await on_token(iteration, token_text)
+                    token_text, thinking_parts = _extract_text_and_thinking_parts(chunk.content)
+                    if thinking_parts and on_thinking:
+                        for t in thinking_parts:
+                            if t:
+                                await on_thinking(iteration, t)
+                    if token_text:
+                        full_content_parts.append(token_text)
+                        await on_token(iteration, token_text)
         except Exception as exc:
             SmartLogger.log(
                 "ERROR",

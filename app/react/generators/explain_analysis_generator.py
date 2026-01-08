@@ -255,7 +255,7 @@ class ExplainAnalysisGenerator:
 
     def __init__(self):
         self.prompt_text = get_prompt_text("explain_analysis_prompt.xml")
-        self.llm = create_react_llm()
+        self.llm = create_react_llm(thinking_level="low")
         self.db_type = settings.target_db_type
 
     async def generate(
