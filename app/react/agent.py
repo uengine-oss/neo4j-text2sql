@@ -24,7 +24,7 @@ from app.react.enrich_react_metadata import (
     auto_enrich_tables_from_reasoning
 )
 from app.react.state import ReactMetadata, ReactSessionState, MetadataParseError
-from app.react.llm_factory import create_react_llm
+from app.react.llm_factory import ReactLLMHandle, create_react_llm
 from app.react.tools import ToolContext, ToolExecutionError, execute_tool
 from app.react.utils import XmlUtil
 from app.react.prompts import get_prompt_text
@@ -207,7 +207,91 @@ def _maybe_rewrite_tool_call_for_policy(
 class ReactAgent:
     def __init__(self):
         self.prompt_text = get_prompt_text("react_prompt.xml")
-        self.llm = create_react_llm(thinking_level="medium")
+        # Primary ReAct LLM (may use Gemini context caching via cached_content)
+        self.llm_handle: ReactLLMHandle = create_react_llm(
+            purpose="react",
+            thinking_level="medium",
+            system_prompt=self.prompt_text,
+            allow_context_cache=True,
+            include_thoughts=True,
+        )
+        # Reprint LLM must NOT use cached_content to avoid system prompt collisions.
+        self.reprint_llm_handle: ReactLLMHandle = create_react_llm(
+            purpose="xml-reprint",
+            thinking_level="low",
+            system_prompt=None,
+            allow_context_cache=False,
+            include_thoughts=False,
+        )
+
+    def _maybe_upgrade_context_cache(
+        self,
+        *,
+        react_run_id: Optional[str],
+        iteration: Optional[int],
+        call_site: str,
+    ) -> None:
+        """
+        옵션 A: 동일 ReactAgent/run 내에서도, 캐시가 준비되면 다음 LLM 호출부터
+        cached_content를 사용하도록 핸들을 업그레이드합니다.
+        """
+        if self.llm_handle.uses_context_cache:
+            return
+
+        # Re-check cache state right before calling the LLM.
+        upgraded = create_react_llm(
+            purpose="react",
+            thinking_level="medium",
+            system_prompt=self.prompt_text,
+            allow_context_cache=True,
+            include_thoughts=True,
+        )
+        if (not self.llm_handle.uses_context_cache) and upgraded.uses_context_cache:
+            SmartLogger.log(
+                "INFO",
+                "react.llm.context_cache.upgraded",
+                category="react.llm.context_cache.upgraded",
+                params=sanitize_for_log(
+                    {
+                        "react_run_id": react_run_id,
+                        "iteration": iteration,
+                        "call_site": call_site,
+                        "model": getattr(upgraded.llm, "model_name", None)
+                        or getattr(upgraded.llm, "model", None),
+                        "cached_content": upgraded.cached_content_name,
+                    }
+                ),
+            )
+            print(
+                f"[react.llm.context_cache.upgraded] run={react_run_id} iter={iteration} site={call_site} cached_content={upgraded.cached_content_name}"
+            )
+        self.llm_handle = upgraded
+
+    @staticmethod
+    def _extract_text_only(content: Any) -> str:
+        """
+        Extract only 'text' parts from Gemini/LangChain content payloads.
+        Avoid polluting XML with structured 'thinking' dicts.
+        """
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            if "text" in content and str(content.get("text") or ""):
+                return str(content.get("text") or "")
+            return ""
+        if isinstance(content, list):
+            out: List[str] = []
+            for part in content:
+                if isinstance(part, str) and part:
+                    out.append(part)
+                    continue
+                if isinstance(part, dict) and "text" in part and str(part.get("text") or ""):
+                    out.append(str(part.get("text") or ""))
+                    continue
+            return "".join(out)
+        return str(content)
 
     async def _call_llm_xml_reprint(
         self,
@@ -248,25 +332,16 @@ class ReactAgent:
                     "react_run_id": react_run_id,
                     "iteration": iteration,
                     "phase": "thinking",
-                    "model": getattr(self.llm, "model_name", None)
-                    or getattr(self.llm, "model", None),
+                    "model": getattr(self.reprint_llm_handle.llm, "model_name", None)
+                    or getattr(self.reprint_llm_handle.llm, "model", None),
                     "raw_llm_text": raw_llm_text,
                 }
             ),
         )
         started = time.perf_counter()
-        response = await self.llm.ainvoke(messages)
+        response = await self.reprint_llm_handle.llm.ainvoke(messages)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
-
-        if isinstance(response.content, str):
-            content = response.content
-        elif isinstance(response.content, list):
-            content = "\n".join(
-                part["text"] if isinstance(part, dict) and "text" in part else str(part)
-                for part in response.content
-            )
-        else:
-            content = str(response.content)
+        content = self._extract_text_only(getattr(response, "content", None))
 
         SmartLogger.log(
             "ERROR",
@@ -975,10 +1050,16 @@ class ReactAgent:
         react_run_id: Optional[str] = None,
         iteration: Optional[int] = None,
     ) -> str:
-        messages = [
-            SystemMessage(content=self.prompt_text),
-            HumanMessage(content=input_xml),
-        ]
+        self._maybe_upgrade_context_cache(
+            react_run_id=react_run_id,
+            iteration=iteration,
+            call_site="_call_llm",
+        )
+        llm = self.llm_handle.llm
+        use_cache = self.llm_handle.uses_context_cache
+        messages = [HumanMessage(content=input_xml)]
+        if not use_cache:
+            messages.insert(0, SystemMessage(content=self.prompt_text))
         SmartLogger.log(
             "INFO",
             "react.llm.request",
@@ -988,15 +1069,16 @@ class ReactAgent:
                     "react_run_id": react_run_id,
                     "iteration": iteration,
                     "phase": "thinking",
-                    "model": getattr(self.llm, "model_name", None)
-                    or getattr(self.llm, "model", None),
+                    "model": getattr(llm, "model_name", None) or getattr(llm, "model", None),
+                    "uses_context_cache": use_cache,
+                    "cached_content": getattr(self.llm_handle, "cached_content_name", None),
                     "user_prompt": input_xml,
                 }
             ),
         )
         llm_started = time.perf_counter()
         try:
-            response = await self.llm.ainvoke(messages)
+            response = await llm.ainvoke(messages)
         except Exception as exc:
             llm_elapsed_ms = (time.perf_counter() - llm_started) * 1000.0
             SmartLogger.log(
@@ -1035,15 +1117,7 @@ class ReactAgent:
                 ),
             )
 
-        if isinstance(response.content, str):
-            content = response.content
-        elif isinstance(response.content, list):
-            content = "\n".join(
-                part["text"] if isinstance(part, dict) and "text" in part else str(part)
-                for part in response.content
-            )
-        else:
-            content = str(response.content)
+        content = self._extract_text_only(getattr(response, "content", None))
 
         SmartLogger.log(
             "INFO",
@@ -1071,10 +1145,16 @@ class ReactAgent:
         react_run_id: Optional[str] = None,
     ) -> str:
         """LLM을 스트리밍 모드로 호출하여 토큰 단위로 콜백합니다."""
-        messages = [
-            SystemMessage(content=self.prompt_text),
-            HumanMessage(content=input_xml),
-        ]
+        self._maybe_upgrade_context_cache(
+            react_run_id=react_run_id,
+            iteration=iteration,
+            call_site="_call_llm_streaming",
+        )
+        llm = self.llm_handle.llm
+        use_cache = self.llm_handle.uses_context_cache
+        messages = [HumanMessage(content=input_xml)]
+        if not use_cache:
+            messages.insert(0, SystemMessage(content=self.prompt_text))
         SmartLogger.log(
             "INFO",
             "react.llm.request.streaming",
@@ -1084,8 +1164,9 @@ class ReactAgent:
                     "react_run_id": react_run_id,
                     "iteration": iteration,
                     "phase": "thinking",
-                    "model": getattr(self.llm, "model_name", None)
-                    or getattr(self.llm, "model", None)
+                    "model": getattr(llm, "model_name", None) or getattr(llm, "model", None),
+                    "uses_context_cache": use_cache,
+                    "cached_content": getattr(self.llm_handle, "cached_content_name", None),
                 }
             ),
         )
@@ -1132,7 +1213,7 @@ class ReactAgent:
 
         full_content_parts: List[str] = []
         try:
-            async for chunk in self.llm.astream(messages):
+            async for chunk in llm.astream(messages):
                 if hasattr(chunk, 'content') and chunk.content:
                     token_text, thinking_parts = _extract_text_and_thinking_parts(chunk.content)
                     if thinking_parts and on_thinking:

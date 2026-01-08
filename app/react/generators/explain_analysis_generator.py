@@ -14,7 +14,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from app.config import settings
 from app.core.sql_exec import SQLExecutionError, SQLExecutor
 from app.core.sql_guard import SQLGuard, SQLValidationError
-from app.react.llm_factory import create_react_llm
+from app.react.llm_factory import ReactLLMHandle, create_react_llm
 from app.react.prompts import get_prompt_text
 from app.react.utils import XmlUtil
 from app.react.utils.db_query_builder import ExecutionPlanResult, get_query_builder, TableMetadata
@@ -255,7 +255,13 @@ class ExplainAnalysisGenerator:
 
     def __init__(self):
         self.prompt_text = get_prompt_text("explain_analysis_prompt.xml")
-        self.llm = create_react_llm(thinking_level="low")
+        self.llm_handle: ReactLLMHandle = create_react_llm(
+            purpose="explain-analysis",
+            thinking_level="low",
+            system_prompt=self.prompt_text,
+            allow_context_cache=True,
+            include_thoughts=False,
+        )
         self.db_type = settings.target_db_type
 
     async def generate(
@@ -332,10 +338,11 @@ class ExplainAnalysisGenerator:
         )
 
     async def _call_llm(self, input_xml: str, *, react_run_id: Optional[str] = None) -> str:
-        messages = [
-            SystemMessage(content=self.prompt_text),
-            HumanMessage(content=input_xml),
-        ]
+        llm = self.llm_handle.llm
+        use_cache = self.llm_handle.uses_context_cache
+        messages = [HumanMessage(content=input_xml)]
+        if not use_cache:
+            messages.insert(0, SystemMessage(content=self.prompt_text))
         SmartLogger.log(
             "INFO",
             "react.explain.llm.request",
@@ -343,15 +350,16 @@ class ExplainAnalysisGenerator:
             params=sanitize_for_log(
                 {
                     "react_run_id": react_run_id,
-                    "model": getattr(self.llm, "model_name", None)
-                    or getattr(self.llm, "model", None),
+                    "model": getattr(llm, "model_name", None) or getattr(llm, "model", None),
+                    "uses_context_cache": use_cache,
+                    "cached_content": getattr(self.llm_handle, "cached_content_name", None),
                     "user_prompt": input_xml,
                 }
             ),
         )
         llm_started = time.perf_counter()
         try:
-            response = await self.llm.ainvoke(messages)
+            response = await llm.ainvoke(messages)
         except Exception as exc:
             llm_elapsed_ms = (time.perf_counter() - llm_started) * 1000.0
             SmartLogger.log(
@@ -372,7 +380,7 @@ class ExplainAnalysisGenerator:
         llm_elapsed_ms = (time.perf_counter() - llm_started) * 1000.0
         if isinstance(response.content, str):
             content = response.content
-        if isinstance(response.content, list):
+        elif isinstance(response.content, list):
             content = "\n".join(
                 part.get("text", "")
                 if isinstance(part, dict)

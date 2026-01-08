@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     smart_logger_file_output: bool = False
     smart_logger_remove_log_on_create: bool = False
     smart_logger_blacklist_messages: str = "[]"
+
+    # Gemini Context Caching
+    gemini_context_cache_enabled: bool = True
+    gemini_context_cache_ttl_seconds: int = 3600
+    gemini_context_cache_refresh_buffer_seconds: int = 120
+    gemini_context_cache_retry_backoff_seconds: int = 60
+
     class Config:
         env_file = ".env"
         case_sensitive = False
