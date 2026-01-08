@@ -210,7 +210,7 @@ class ReactAgent:
         # Primary ReAct LLM (may use Gemini context caching via cached_content)
         self.llm_handle: ReactLLMHandle = create_react_llm(
             purpose="react",
-            thinking_level="medium",
+            thinking_level="low",
             system_prompt=self.prompt_text,
             allow_context_cache=True,
             include_thoughts=True,
@@ -241,7 +241,7 @@ class ReactAgent:
         # Re-check cache state right before calling the LLM.
         upgraded = create_react_llm(
             purpose="react",
-            thinking_level="medium",
+            thinking_level="low",
             system_prompt=self.prompt_text,
             allow_context_cache=True,
             include_thoughts=True,
