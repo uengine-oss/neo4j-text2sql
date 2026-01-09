@@ -179,6 +179,15 @@
 						</correct>
 						<incorrect>{"sql": "SELECT * FROM table_name"}</incorrect>
 					</tool>
+					
+					<tool name="find_similar_query">
+						<correct>
+							<parameters>
+								<question>The natural language question to search</question>
+							</parameters>
+						</correct>
+						<incorrect>{"question": "The question"}</incorrect>
+					</tool>
 				</format_by_tool>
 			</parameters_format>
 		</instruction>
@@ -245,6 +254,52 @@
 					<warning>Query will timeout and raise an error if execution exceeds max_sql_seconds. If timeout occurs, optimize the query based on explain results.</warning>
 				</tool>
 				
+				<tool name="find_similar_query">
+					<purpose>Search query history for similar questions and their SQL with value mappings</purpose>
+					<parameters>
+						<param name="question" type="string">The natural language question to find similar queries for</param>
+						<param name="min_similarity" type="number" default="0.3">Minimum similarity threshold (0.0-1.0)</param>
+					</parameters>
+					<returns>
+						<return_item>similar_queries: Past queries with SQL templates and execution stats</return_item>
+						<return_item>value_mappings: Natural language → code mappings (e.g., "강릉" → "BPLC006")</return_item>
+						<return_item>action_required: IMMEDIATE_TEMPLATE_REUSE (>=80%) or ADAPT_TEMPLATE (>=50%)</return_item>
+					</returns>
+					<critical_behavior>
+						<when action="IMMEDIATE_TEMPLATE_REUSE">
+							SKIP schema exploration entirely!
+							1. Use the provided SQL template directly
+							2. Replace WHERE clause values using value_mappings
+							3. Proceed directly to explain → submit_sql
+							4. Do NOT call get_table_schema or search_tables
+						</when>
+						<when action="ADAPT_TEMPLATE">
+							1. Use the SQL template as a starting point
+							2. Apply value_mappings for WHERE clause values
+							3. Optionally verify with get_table_schema if needed
+							4. Minimize additional tool calls
+						</when>
+					</critical_behavior>
+					<value_mapping_usage>
+						CRITICAL: When value_mappings are provided, USE THEM IMMEDIATELY!
+						Example: If value_mappings shows "강릉" → "BPLC006", use BPLC006 in WHERE clause.
+						Do NOT search for values that are already provided in value_mappings.
+					</value_mapping_usage>
+					<usage_tip>Use this FIRST before exploring schema. If action_required is IMMEDIATE_TEMPLATE_REUSE, you can complete the query in just 3 steps: find_similar_query → explain → submit_sql</usage_tip>
+					<when_to_use>
+						<condition>As the FIRST tool call for ALL queries</condition>
+						<condition>When the question involves common patterns (e.g., aggregations, filters by name/code)</condition>
+						<condition>When you want to reuse proven SQL templates</condition>
+					</when_to_use>
+					<parameters_format>
+						<correct>
+							<parameters>
+								<question>Natural language question to search for</question>
+							</parameters>
+						</correct>
+					</parameters_format>
+				</tool>
+				
 				<tool name="ask_user">
 					<purpose>Ask the user for clarification when information is ambiguous</purpose>
 					<parameters>
@@ -298,44 +353,84 @@
 					<action>Understand and Check Ambiguity</action>
 					<detail>Analyze the user's natural language query. Identify key entities, operations, filters, and aggregations needed. Note the max_sql_seconds constraint. CRITICAL: Before proceeding, check if the query contains ambiguous elements that CANNOT be resolved through database schema exploration alone. If such ambiguity exists, use ask_user IMMEDIATELY before any other tool calls.</detail>
 				</step>
+				<step id="1.5">
+					<action>Check Query History (MANDATORY FIRST STEP)</action>
+					<detail>Use find_similar_query as your FIRST tool call. Check the action_required field in the response:</detail>
+					<critical_path action="IMMEDIATE_TEMPLATE_REUSE">
+						When action_required = IMMEDIATE_TEMPLATE_REUSE (similarity >= 80%):
+						1. Take the SQL template from similar_queries
+						2. Apply value_mappings to replace WHERE clause values (e.g., "강릉" → "BPLC006")
+						3. SKIP steps 2-5 entirely
+						4. Go directly to step 6 (explain) with the modified SQL
+						5. Then submit_sql - complete in just 3 tool calls!
+					</critical_path>
+					<fast_path action="ADAPT_TEMPLATE">
+						When action_required = ADAPT_TEMPLATE (similarity >= 50%):
+						1. Use the SQL template as a base
+						2. Apply value_mappings for known values
+						3. Only call get_table_schema if truly necessary
+						4. Minimize additional exploration - aim for 4-5 total tool calls
+					</fast_path>
+					<benefit>IMMEDIATE_TEMPLATE_REUSE can complete queries in 3 steps instead of 10+</benefit>
+				</step>
 				<step id="2">
-					<action>Plan</action>
-					<detail>Determine what schema information you need. Plan your tool calls efficiently given the remaining limit and max_sql_seconds constraint.</detail>
+					<action>Plan (Skip if IMMEDIATE_TEMPLATE_REUSE)</action>
+					<detail>Based on find_similar_query results, determine what schema information you still need. If action_required was IMMEDIATE_TEMPLATE_REUSE, skip this step entirely.</detail>
 				</step>
 				<step id="3">
-					<action>Search</action>
-					<detail>Use search_tables to find relevant tables. Use diverse and specific search terms.</detail>
+					<action>Search (Skip if similar query found)</action>
+					<detail>Use search_tables to find relevant tables. SKIP this step if find_similar_query returned similar queries with tables_used information.</detail>
 				</step>
 				<step id="4">
-					<action>Examine</action>
-					<detail>Use get_table_schema to understand table structures, relationships, and constraints.</detail>
+					<action>Examine (Skip if IMMEDIATE_TEMPLATE_REUSE)</action>
+					<detail>Use get_table_schema to understand table structures. SKIP this step if using IMMEDIATE_TEMPLATE_REUSE path.</detail>
 				</step>
 				<step id="5">
-					<action>Verify Values</action>
-					<detail>Use search_column_values to find exact values when the user mentions specific entities.</detail>
+					<action>Verify Values (Skip if value_mappings provided)</action>
+					<detail>Use search_column_values only if value_mappings did NOT provide the needed value. If find_similar_query already provided value_mappings (e.g., "강릉" → "BPLC006"), USE THOSE VALUES directly without additional search.</detail>
 				</step>
 				<step id="6">
 					<action>Analyze Performance</action>
-					<detail>Use explain to analyze the SQL execution plan. Check if estimated execution time is within max_sql_seconds. If not, optimize the query or ask user for alternatives.</detail>
+					<detail>Use explain to analyze the SQL execution plan. This step is MANDATORY even when using template reuse.</detail>
 				</step>
 				<step id="7">
-					<action>Clarify</action>
-					<detail>Use ask_user if the query is ambiguous, OR if the query cannot meet max_sql_seconds constraint and user input is needed. Present clear options in business terms.</detail>
+					<action>Clarify (Only if needed)</action>
+					<detail>Use ask_user only if query is ambiguous OR cannot meet max_sql_seconds constraint.</detail>
 				</step>
 				<step id="8">
-					<action>Preview</action>
-					<detail>Use execute_sql_preview to validate the SQL after explain confirms acceptable performance.</detail>
+					<action>Preview (Optional for template reuse)</action>
+					<detail>Use execute_sql_preview to validate. Can skip if using IMMEDIATE_TEMPLATE_REUSE with proven SQL.</detail>
 				</step>
 				<step id="9">
 					<action>Submit</action>
-					<detail>Use submit_sql to provide the final SQL query once it's validated and meets performance requirements.</detail>
+					<detail>Use submit_sql to provide the final SQL query.</detail>
 				</step>
 			</process>
+			<efficiency_reminder>
+				With IMMEDIATE_TEMPLATE_REUSE: find_similar_query → explain → submit_sql (3 calls)
+				With ADAPT_TEMPLATE: find_similar_query → get_table_schema → explain → submit_sql (4-5 calls)
+				Without similar query: Full exploration path (8-15 calls)
+			</efficiency_reminder>
 		</instruction>
 	</core_instructions>
 
 	<critical_rules>
 		<title>Critical Rules</title>
+		
+		<rule id="0" name="CRITICAL: Adapted SQL Priority">
+			<description>When find_similar_query returns &lt;adapted_sql&gt;, USE IT IMMEDIATELY</description>
+			<critical>
+				If the tool result contains &lt;adapted_sql&gt; with action_required=IMMEDIATE_TEMPLATE_REUSE:
+				1. COPY the SQL from &lt;adapted_sql&gt; EXACTLY
+				2. Call explain with that SQL immediately
+				3. DO NOT call get_table_schema
+				4. DO NOT call search_column_values
+				5. DO NOT call search_tables
+				After explain, if successful, proceed directly to submit_sql.
+				This is the FASTEST path: find_similar_query → explain → submit_sql (3 steps only)
+			</critical>
+			<violation_penalty>Calling get_table_schema or search_column_values after receiving &lt;adapted_sql&gt; is a WASTE of tool calls and VIOLATION of this rule.</violation_penalty>
+		</rule>
 		
 		<rule id="1" name="Tool Call Efficiency">
 			<description>You have a LIMITED number of tool calls. Use them wisely.</description>
@@ -344,6 +439,7 @@
 				<guideline>Combine multiple searches in a single tool call when possible</guideline>
 				<guideline>Don't retrieve schema for tables that are clearly irrelevant</guideline>
 				<guideline>Track your remaining_tool_calls carefully</guideline>
+				<guideline>CRITICAL: If find_similar_query provides &lt;adapted_sql&gt;, use it directly without additional exploration</guideline>
 			</guidelines>
 		</rule>
 		

@@ -216,7 +216,9 @@ async def execute(
                dtype: c.dtype,
                nullable: c.nullable,
                description: c.description,
-               is_primary_key: c.is_primary_key
+               is_primary_key: c.is_primary_key,
+               enum_values: c.enum_values,
+               cardinality: c.cardinality
            }) AS columns
     ORDER BY table_schema, table_name
     """
@@ -373,6 +375,21 @@ async def execute(
 
             if column_values:
                 result_parts.append(f"<values>{_serialize_values(column_values)}</values>")
+            
+            # Include cached enum values from Neo4j if available
+            enum_values_json = col.get("enum_values")
+            cardinality = col.get("cardinality")
+            if enum_values_json and cardinality:
+                try:
+                    enum_values = json.loads(enum_values_json)
+                    if enum_values and len(enum_values) <= 50:  # Only include if reasonable size
+                        result_parts.append(f"<cardinality>{cardinality}</cardinality>")
+                        # Extract just the values for cleaner output
+                        enum_list = [ev.get("value", "") for ev in enum_values if ev.get("value")]
+                        result_parts.append(f"<cached_enum_values>{json.dumps(enum_list, ensure_ascii=False)}</cached_enum_values>")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            
             result_parts.append("</column>")
         result_parts.append("</columns>")
         result_parts.append("</table>")

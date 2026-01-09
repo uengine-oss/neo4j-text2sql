@@ -7,6 +7,7 @@ from . import (
     search_column_values as search_column_values_tool,
     execute_sql_preview as execute_sql_preview_tool,
     explain as explain_tool,
+    find_similar_query as find_similar_query_tool,
 )
 
 
@@ -20,6 +21,7 @@ TOOL_HANDLERS = {
     "search_column_values": search_column_values_tool.execute,
     "execute_sql_preview": execute_sql_preview_tool.execute,
     "explain": explain_tool.execute,
+    "find_similar_query": find_similar_query_tool.execute,
 }
 
 
@@ -71,6 +73,13 @@ async def execute_tool(
         if not sql_text:
             raise ToolExecutionError("sql parameter is required")
         return await handler(context, sql_text)
+    
+    if tool_name == "find_similar_query":
+        question = parameters.get("question")
+        min_similarity = parameters.get("min_similarity", 0.3)
+        if not question:
+            raise ToolExecutionError("question parameter is required")
+        return await handler(context, question, min_similarity)
 
     raise ToolExecutionError(f"No handler implemented for tool: {tool_name}")
 

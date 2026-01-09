@@ -1483,6 +1483,25 @@ class ReactAgent:
             question = "".join(parameters_el.itertext()).strip()
             return {"question": question}
 
+        if tool_name == "find_similar_query":
+            # Parse <question> element or fallback to text content
+            question_el = parameters_el.find("question")
+            if question_el is not None and question_el.text:
+                question = question_el.text.strip()
+            else:
+                question = "".join(parameters_el.itertext()).strip()
+            
+            # Parse optional min_similarity
+            min_similarity = 0.3
+            min_sim_el = parameters_el.find("min_similarity")
+            if min_sim_el is not None and min_sim_el.text:
+                try:
+                    min_similarity = float(min_sim_el.text.strip())
+                except ValueError:
+                    pass
+            
+            return {"question": question, "min_similarity": min_similarity}
+
         raise LLMResponseFormatError(f"Unsupported tool requested: {tool_name}")
 
     @staticmethod
