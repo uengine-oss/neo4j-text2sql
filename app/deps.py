@@ -72,6 +72,10 @@ async def get_db_connection() -> AsyncGenerator[asyncpg.Connection, None]:
         password=settings.target_db_password,
     )
     try:
+        # Set search_path to include all configured schemas (public, dw, etc.)
+        schemas = settings.target_db_schemas.split(',')
+        schemas_str = ', '.join(s.strip() for s in schemas)
+        await conn.execute(f"SET search_path TO {schemas_str}")
         yield conn
     finally:
         await conn.close()

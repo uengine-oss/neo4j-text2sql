@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     target_db_user: str
     target_db_password: str
     target_db_schema: str = "public"
+    target_db_schemas: str = "public,dw"  # Comma-separated list of schemas to access
     
     # API
     api_host: str = "0.0.0.0"

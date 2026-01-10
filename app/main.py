@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 
 from app.config import settings
 from app.deps import neo4j_conn
-from app.routers import ask, meta, feedback, ingest, react, vectorize, history, cache
+from app.routers import ask, meta, feedback, ingest, react, vectorize, history, cache, direct_sql
 from app.smart_logger import SmartLogger
 
 @asynccontextmanager
@@ -86,6 +86,9 @@ app.include_router(history.router, prefix="/text2sql")
 
 # Include cache router
 app.include_router(cache.router, prefix="/text2sql")
+
+# Include direct SQL router
+app.include_router(direct_sql.router, prefix="/text2sql")
 
 
 @app.get("/")
