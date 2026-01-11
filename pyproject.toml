@@ -19,5 +19,6 @@ dependencies = [
     "sqlglot>=27.24.2",
     "uvicorn>=0.37.0",
     "pytest>=9.0.1",
-    "pytest-asyncio>=1.3.0"
+    "pytest-asyncio>=1.3.0",
+    "sse-starlette>=3.0.3",
 ]

@@ -90,6 +90,14 @@ app.include_router(cache.router, prefix="/text2sql")
 # Include direct SQL router
 app.include_router(direct_sql.router, prefix="/text2sql")
 
+# Include events router for event detection and actions
+from app.routers import events
+app.include_router(events.router, prefix="/text2sql")
+
+# Include event templates router
+from app.routers import event_templates
+app.include_router(event_templates.router, prefix="/text2sql")
+
 
 @app.get("/")
 async def root():

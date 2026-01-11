@@ -492,3 +492,5 @@ BEGIN
     RAISE NOTICE '생성된 테이블: rdzgacode_tb, rdisaup_tb, rditagunit_tb, rditag_tb, rdzgalist_tb, rdzgahighlist_tb, rdr01mi_tb_old, rdf01hh_tb, rdievent_tb';
 END $$;
 
+
+
