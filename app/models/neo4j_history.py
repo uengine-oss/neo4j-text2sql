@@ -24,9 +24,14 @@ Neo4j 기반 쿼리 히스토리 온톨로지 저장소
 
 import re
 import hashlib
+import time
+import traceback
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 from pydantic import BaseModel, Field
+from app.smart_logger import SmartLogger
+from app.react.utils.log_sanitize import sanitize_for_log
+from app.config import settings
 
 
 class QueryNode(BaseModel):
@@ -94,19 +99,69 @@ class Neo4jQueryRepository:
             CREATE INDEX value_mapping_natural_idx IF NOT EXISTS
             FOR (v:ValueMapping) ON (v.natural_value)
             """
+            ,
+            """
+            CREATE VECTOR INDEX query_vec_index IF NOT EXISTS
+            FOR (q:Query) ON (q.vector)
+            OPTIONS {
+                indexConfig: {
+                    `vector.dimensions`: $dimensions,
+                    `vector.similarity_function`: 'cosine'
+                }
+            }
+            """
         ]
         
         for query in constraints:
             try:
-                await self.session.run(query)
+                if "$dimensions" in query:
+                    await self.session.run(query, dimensions=settings.embedding_dimension)
+                else:
+                    await self.session.run(query)
             except Exception as e:
                 # 제약조건이 이미 존재할 수 있음
-                print(f"Constraint setup warning: {e}")
+                SmartLogger.log(
+                    "WARNING",
+                    "neo4j_history.setup_constraints.warning",
+                    category="neo4j.history.setup_constraints",
+                    params=sanitize_for_log({"cypher": query, "exception": repr(e)}),
+                    max_inline_chars=0,
+                )
     
-    def _generate_query_id(self, question: str, sql: str) -> str:
-        """쿼리 ID 생성"""
-        content = f"{question}:{sql or ''}"
+    @staticmethod
+    def _normalize_question_for_id(question: str) -> str:
+        # Keep semantics strict (string-equality policy) but avoid trivial whitespace drift.
+        return (question or "").strip()
+
+    def _generate_query_id(self, db: str, question: str) -> str:
+        """쿼리 ID 생성: db + question(문자열 동일) 기준 단일 Query 노드"""
+        qn = self._normalize_question_for_id(question)
+        content = f"{db}:{qn}"
         return hashlib.md5(content.encode()).hexdigest()[:12]
+
+    @staticmethod
+    def _status_rank(status: Optional[str]) -> int:
+        s = (status or "").lower().strip()
+        if s == "completed":
+            return 0
+        if s == "error":
+            return 2
+        return 1
+
+    @classmethod
+    def _candidate_rank(
+        cls,
+        *,
+        status: Optional[str],
+        steps_count: Optional[int],
+        execution_time_ms: Optional[float],
+        best_run_at_ms: Optional[int],
+    ) -> Tuple[int, int, float, int]:
+        # Lower tuple is better; tie-breaker prefers newer run => use negative timestamp.
+        sc = int(steps_count) if steps_count is not None else 10**9
+        et = float(execution_time_ms) if execution_time_ms is not None else 1e18
+        ts = int(best_run_at_ms) if best_run_at_ms is not None else 0
+        return (cls._status_rank(status), sc, et, -ts)
     
     def _extract_sql_components(self, sql: str) -> Dict[str, Any]:
         """SQL에서 컴포넌트 추출 (테이블, 컬럼, 조건 등)"""
@@ -212,150 +267,338 @@ class Neo4jQueryRepository:
         execution_time_ms: Optional[float] = None,
         steps_count: Optional[int] = None,
         error_message: Optional[str] = None,
-        steps: Optional[List[Dict]] = None  # 전체 도구 호출 과정
+        steps: Optional[List[Dict]] = None,  # legacy: raw steps (will be minimized)
+        *,
+        db: Optional[str] = None,
+        steps_summary: Optional[str] = None,
+        value_mappings: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """쿼리와 관련 메타데이터를 Neo4j에 저장"""
         import json as json_module
-        
-        query_id = self._generate_query_id(question, sql)
-        
-        # steps를 JSON 문자열로 변환 (Neo4j에 저장하기 위해)
-        steps_json = json_module.dumps(steps, ensure_ascii=False) if steps else None
-        
-        # 1. Query 노드 생성 또는 업데이트
-        query_create = """
-        MERGE (q:Query {id: $id})
-        SET q.question = $question,
-            q.sql = $sql,
-            q.status = $status,
-            q.row_count = $row_count,
-            q.execution_time_ms = $execution_time_ms,
-            q.steps_count = $steps_count,
-            q.error_message = $error_message,
-            q.steps = $steps_json,
-            q.updated_at = datetime(),
-            q.created_at = COALESCE(q.created_at, datetime())
-        RETURN q.id
-        """
-        
-        await self.session.run(
-            query_create,
+
+        started = time.perf_counter()
+        # IMPORTANT: Neo4j schema graph uses `Table.db` as a DB TYPE label (oracle/postgresql/mysql),
+        # not the physical database name. Cache graph logic must follow `react_caching_db_type`.
+        db_name = (db or settings.react_caching_db_type or "").strip()
+        query_id = self._generate_query_id(db_name, question)
+        now_ms = int(time.time() * 1000)
+
+        # Overwrite policy: completed > steps_count(min) > execution_time_ms(min) > best_run_at_ms(latest)
+        existing_result = await self.session.run(
+            """
+            MATCH (q:Query {id: $id})
+            RETURN q.status AS status,
+                   q.steps_count AS steps_count,
+                   q.execution_time_ms AS execution_time_ms,
+                   q.best_run_at_ms AS best_run_at_ms
+            """,
             id=query_id,
-            question=question,
-            sql=sql,
-            status=status,
-            row_count=row_count,
-            execution_time_ms=execution_time_ms,
-            steps_count=steps_count,
-            error_message=error_message,
-            steps_json=steps_json
         )
-        
-        if sql:
-            # 2. SQL 컴포넌트 추출
-            components = self._extract_sql_components(sql)
-            
-            # 3. 테이블 관계 생성
-            for table in components.get('tables', []):
-                await self.session.run("""
-                    MATCH (q:Query {id: $query_id})
-                    MATCH (t:Table {schema: $schema, name: $table_name})
-                    MERGE (q)-[:USES_TABLE]->(t)
-                """, 
-                    query_id=query_id,
-                    schema=table['schema'],
-                    table_name=table['name']
-                )
-            
-            # 4. 집계 함수 관계 생성
-            for agg in components.get('aggregate_functions', []):
-                await self.session.run("""
-                    MATCH (q:Query {id: $query_id})
-                    MATCH (c:Column) WHERE toLower(c.name) = $column_name
-                    MERGE (q)-[r:AGGREGATES]->(c)
-                    SET r.function = $function
-                """,
-                    query_id=query_id,
-                    column_name=agg['column'],
-                    function=agg['function']
-                )
-            
-            # 5. 필터 조건 관계 생성
-            for filter_cond in components.get('filter_conditions', []):
-                await self.session.run("""
-                    MATCH (q:Query {id: $query_id})
-                    MATCH (c:Column) WHERE toLower(c.name) = $column_name
-                    MERGE (q)-[r:FILTERS]->(c)
-                    SET r.operator = $operator,
-                        r.value = $value
-                """,
-                    query_id=query_id,
-                    column_name=filter_cond['column'],
-                    operator=filter_cond['operator'],
-                    value=filter_cond['value']
-                )
-            
-            # 6. GROUP BY 관계 생성
-            for group_col in components.get('group_by_columns', []):
-                await self.session.run("""
-                    MATCH (q:Query {id: $query_id})
-                    MATCH (c:Column) WHERE toLower(c.name) = $column_name
-                    MERGE (q)-[:GROUPS_BY]->(c)
-                """,
-                    query_id=query_id,
-                    column_name=group_col
-                )
-        
-        # 7. 값 매핑 저장
-        value_mappings = self._extract_value_mappings(question, sql, metadata or {})
-        for mapping in value_mappings:
-            await self.save_value_mapping(
-                natural_value=mapping['natural_value'],
-                code_value=mapping['code_value'],
-                column_name=mapping['column']
+        existing_record = await existing_result.single()
+        existing_rank: Optional[Tuple[int, int, float, int]] = None
+        if existing_record:
+            existing_rank = self._candidate_rank(
+                status=existing_record.get("status"),
+                steps_count=existing_record.get("steps_count"),
+                execution_time_ms=existing_record.get("execution_time_ms"),
+                best_run_at_ms=existing_record.get("best_run_at_ms"),
             )
-        
-        # 8. 메타데이터에서 추가 관계 저장
-        if metadata:
-            # identified_tables
-            for table in metadata.get('identified_tables', []):
-                if table.get('schema') and table.get('name'):
-                    await self.session.run("""
-                        MATCH (q:Query {id: $query_id})
-                        MATCH (t:Table {schema: $schema, name: $table_name})
-                        MERGE (q)-[:USES_TABLE]->(t)
+        incoming_rank = self._candidate_rank(
+            status=status,
+            steps_count=steps_count,
+            execution_time_ms=execution_time_ms,
+            best_run_at_ms=now_ms,
+        )
+        should_overwrite = existing_rank is None or incoming_rank < existing_rank
+
+        if steps_summary is None:
+            steps_summary = self._minimize_steps_summary(steps, json_module=json_module)
+
+        SmartLogger.log(
+            "INFO",
+            "neo4j_history.save_query.start",
+            category="neo4j.history.save_query",
+            params=sanitize_for_log(
+                {
+                    "query_id": query_id,
+                    "db": db_name,
+                    "should_overwrite": should_overwrite,
+                    "question": question,
+                    "sql": sql,
+                    "status": status,
+                    "row_count": row_count,
+                    "execution_time_ms": execution_time_ms,
+                    "steps_count": steps_count,
+                    "error_message": error_message,
+                }
+            ),
+            max_inline_chars=0,
+        )
+
+        query_upsert = """
+        MERGE (q:Query {id: $id})
+        ON CREATE SET q.created_at = datetime(),
+                      q.created_at_ms = $now_ms
+        SET q.question = $question,
+            q.question_norm = $question_norm,
+            q.last_seen_at = datetime(),
+            q.last_seen_at_ms = $now_ms,
+            q.seen_count = COALESCE(q.seen_count, 0) + 1
+        WITH q
+        FOREACH (_ IN CASE WHEN $overwrite THEN [1] ELSE [] END |
+            SET q.sql = $sql,
+                q.status = $status,
+                q.row_count = $row_count,
+                q.execution_time_ms = $execution_time_ms,
+                q.steps_count = $steps_count,
+                q.error_message = $error_message,
+                q.steps_summary = $steps_summary,
+                q.updated_at = datetime(),
+                q.updated_at_ms = $now_ms,
+                q.best_run_at_ms = $now_ms,
+                q.value_mappings_count = $value_mappings_count,
+                q.value_mapping_terms = $value_mapping_terms
+        )
+        RETURN q.id AS id
+        """
+
+        try:
+            await self.session.run(
+                query_upsert,
+                id=query_id,
+                question=question,
+                question_norm=self._normalize_question_for_id(question),
+                sql=sql,
+                status=status,
+                row_count=row_count,
+                execution_time_ms=execution_time_ms,
+                steps_count=steps_count,
+                error_message=error_message,
+                steps_summary=steps_summary,
+                overwrite=should_overwrite,
+                now_ms=now_ms,
+                value_mappings_count=len(value_mappings or []),
+                value_mapping_terms=[(m.get("natural_value") or "") for m in (value_mappings or []) if isinstance(m, dict)][:20],
+            )
+
+            # Only refresh graph relations when overwriting the best entry.
+            if should_overwrite:
+                await self.session.run(
+                    """
+                    MATCH (q:Query {id: $query_id})-[r]->()
+                    WHERE type(r) IN ['USES_TABLE', 'SELECTS', 'FILTERS', 'AGGREGATES', 'GROUPS_BY', 'JOINS_ON']
+                    DELETE r
                     """,
-                        query_id=query_id,
-                        schema=table['schema'].lower(),
-                        table_name=table['name'].lower()
-                    )
-            
-            # identified_columns with purpose
-            for col in metadata.get('identified_columns', []):
-                purpose = col.get('purpose', 'SELECT').upper()
-                if 'FILTER' in purpose or 'WHERE' in purpose:
-                    rel_type = 'FILTERS'
-                elif 'GROUP' in purpose:
-                    rel_type = 'GROUPS_BY'
-                elif 'AVG' in purpose or 'SUM' in purpose or 'COUNT' in purpose:
-                    rel_type = 'AGGREGATES'
-                elif 'JOIN' in purpose:
-                    rel_type = 'JOINS_ON'
-                else:
-                    rel_type = 'SELECTS'
-                
-                fqn = f"{col.get('schema', 'public')}.{col.get('table', '')}.{col.get('name', '')}".lower()
-                
-                await self.session.run(f"""
-                    MATCH (q:Query {{id: $query_id}})
-                    MATCH (c:Column {{fqn: $fqn}})
-                    MERGE (q)-[:{rel_type}]->(c)
-                """,
                     query_id=query_id,
-                    fqn=fqn
                 )
-        
-        return query_id
+
+                tables_used: List[str] = []
+                columns_used: List[str] = []
+
+                if metadata:
+                    for table in (metadata.get("identified_tables") or []):
+                        schema = (table.get("schema") or "").strip()
+                        name = (table.get("name") or "").strip()
+                        if not schema or not name:
+                            continue
+                        tables_used.append(f"{schema}.{name}")
+                        await self.session.run(
+                            """
+                            MATCH (q:Query {id: $query_id})
+                            MATCH (t:Table)
+                            WHERE toLower(t.db) = toLower($db)
+                              AND toLower(t.schema) = toLower($schema)
+                              AND (
+                                  (t.name IS NOT NULL AND toLower(t.name) = toLower($table_name))
+                                  OR (t.original_name IS NOT NULL AND toLower(t.original_name) = toLower($table_name))
+                              )
+                            WITH q, t LIMIT 1
+                            MERGE (q)-[:USES_TABLE]->(t)
+                            """,
+                            query_id=query_id,
+                            db=db_name,
+                            schema=schema,
+                            table_name=name,
+                        )
+
+                    for col in (metadata.get("identified_columns") or []):
+                        purpose = (col.get("purpose") or "SELECT").upper()
+                        if "FILTER" in purpose or "WHERE" in purpose:
+                            rel_type = "FILTERS"
+                        elif "GROUP" in purpose:
+                            rel_type = "GROUPS_BY"
+                        elif any(fn in purpose for fn in ["AVG", "SUM", "COUNT", "MAX", "MIN"]):
+                            rel_type = "AGGREGATES"
+                        elif "JOIN" in purpose:
+                            rel_type = "JOINS_ON"
+                        else:
+                            rel_type = "SELECTS"
+
+                        schema = (col.get("schema") or "public").strip()
+                        table = (col.get("table") or "").strip()
+                        name = (col.get("name") or "").strip()
+                        if not table or not name:
+                            continue
+                        fqn = f"{schema}.{table}.{name}"
+                        columns_used.append(fqn)
+                        await self.session.run(
+                            f"""
+                            MATCH (q:Query {{id: $query_id}})
+                            MATCH (c:Column)
+                            WHERE c.fqn IS NOT NULL AND toLower(c.fqn) = toLower($fqn)
+                            WITH q, c LIMIT 1
+                            MERGE (q)-[:{rel_type}]->(c)
+                            """,
+                            query_id=query_id,
+                            fqn=fqn,
+                        )
+
+                await self.session.run(
+                    """
+                    MATCH (q:Query {id: $query_id})
+                    SET q.tables_used = $tables_used,
+                        q.columns_used = $columns_used
+                    """,
+                    query_id=query_id,
+                    tables_used=tables_used,
+                    columns_used=columns_used,
+                )
+
+            SmartLogger.log(
+                "INFO",
+                "neo4j_history.save_query.done",
+                category="neo4j.history.save_query",
+                params=sanitize_for_log(
+                    {
+                        "query_id": query_id,
+                        "db": db_name,
+                        "should_overwrite": should_overwrite,
+                        "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+                    }
+                ),
+                max_inline_chars=0,
+            )
+
+            return query_id
+        except Exception as exc:
+            SmartLogger.log(
+                "ERROR",
+                "neo4j_history.save_query.error",
+                category="neo4j.history.save_query",
+                params=sanitize_for_log(
+                    {
+                        "query_id": query_id,
+                        "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+                        "question": question,
+                        "sql": sql,
+                        "status": status,
+                        "exception": repr(exc),
+                        "traceback": traceback.format_exc(),
+                    }
+                ),
+                max_inline_chars=0,
+            )
+            raise
+
+    @staticmethod
+    def _minimize_steps_summary(
+        steps: Optional[List[Dict[str, Any]]],
+        *,
+        json_module,
+    ) -> str:
+        """
+        Legacy fallback when caller didn't provide steps_summary.
+        Store only a small, stable subset (no tool_result payloads).
+        """
+        if not steps:
+            return ""
+        minimized: List[Dict[str, Any]] = []
+        for s in steps[-10:]:
+            if not isinstance(s, dict):
+                continue
+            minimized.append(
+                {
+                    "iteration": s.get("iteration"),
+                    "tool_name": s.get("tool_name"),
+                    "reasoning": (s.get("reasoning") or "")[:400],
+                }
+            )
+        try:
+            return json_module.dumps(minimized, ensure_ascii=False, default=str)
+        except Exception:
+            return ""
+
+    async def save_value_mapping_by_fqn(
+        self,
+        *,
+        natural_value: str,
+        code_value: str,
+        column_fqn: str,
+    ) -> None:
+        """값 매핑을 Neo4j에 저장 (Column.fqn 기반, 품질 우선)."""
+        started = time.perf_counter()
+        cypher = """
+            MATCH (c:Column)
+            WHERE c.fqn IS NOT NULL AND toLower(c.fqn) = toLower($column_fqn)
+            WITH c LIMIT 1
+            MERGE (v:ValueMapping {natural_value: $natural_value, column_fqn: c.fqn})
+            SET v.code_value = $code_value,
+                v.usage_count = COALESCE(v.usage_count, 0) + 1,
+                v.updated_at = datetime()
+            MERGE (v)-[:MAPS_TO]->(c)
+        """
+        SmartLogger.log(
+            "INFO",
+            "neo4j_history.save_value_mapping_by_fqn.start",
+            category="neo4j.history.save_value_mapping",
+            params=sanitize_for_log(
+                {
+                    "natural_value": natural_value,
+                    "code_value": code_value,
+                    "column_fqn": column_fqn,
+                }
+            ),
+            max_inline_chars=0,
+        )
+        try:
+            await self.session.run(
+                cypher,
+                natural_value=natural_value,
+                code_value=code_value,
+                column_fqn=column_fqn,
+            )
+            SmartLogger.log(
+                "INFO",
+                "neo4j_history.save_value_mapping_by_fqn.done",
+                category="neo4j.history.save_value_mapping",
+                params=sanitize_for_log(
+                    {
+                        "natural_value": natural_value,
+                        "code_value": code_value,
+                        "column_fqn": column_fqn,
+                        "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+                    }
+                ),
+                max_inline_chars=0,
+            )
+        except Exception as exc:
+            SmartLogger.log(
+                "ERROR",
+                "neo4j_history.save_value_mapping_by_fqn.error",
+                category="neo4j.history.save_value_mapping",
+                params=sanitize_for_log(
+                    {
+                        "natural_value": natural_value,
+                        "code_value": code_value,
+                        "column_fqn": column_fqn,
+                        "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+                        "exception": repr(exc),
+                        "traceback": traceback.format_exc(),
+                    }
+                ),
+                max_inline_chars=0,
+            )
+            raise
     
     async def save_value_mapping(
         self,
@@ -364,9 +607,9 @@ class Neo4jQueryRepository:
         column_name: str
     ):
         """값 매핑을 Neo4j에 저장"""
-        
-        # 컬럼 찾기 및 매핑 저장
-        await self.session.run("""
+
+        started = time.perf_counter()
+        cypher = """
             MATCH (c:Column) WHERE toLower(c.name) = $column_name
             WITH c LIMIT 1
             MERGE (v:ValueMapping {natural_value: $natural_value, column_fqn: c.fqn})
@@ -374,11 +617,63 @@ class Neo4jQueryRepository:
                 v.usage_count = COALESCE(v.usage_count, 0) + 1,
                 v.updated_at = datetime()
             MERGE (v)-[:MAPS_TO]->(c)
-        """,
-            natural_value=natural_value,
-            code_value=code_value,
-            column_name=column_name.lower()
+        """
+
+        SmartLogger.log(
+            "INFO",
+            "neo4j_history.save_value_mapping.start",
+            category="neo4j.history.save_value_mapping",
+            params=sanitize_for_log(
+                {
+                    "natural_value": natural_value,
+                    "code_value": code_value,
+                    "column_name": column_name,
+                    "cypher": cypher,
+                }
+            ),
+            max_inline_chars=0,
         )
+
+        try:
+            # 컬럼 찾기 및 매핑 저장
+            await self.session.run(
+                cypher,
+                natural_value=natural_value,
+                code_value=code_value,
+                column_name=column_name.lower(),
+            )
+            SmartLogger.log(
+                "INFO",
+                "neo4j_history.save_value_mapping.done",
+                category="neo4j.history.save_value_mapping",
+                params=sanitize_for_log(
+                    {
+                        "natural_value": natural_value,
+                        "code_value": code_value,
+                        "column_name": column_name,
+                        "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+                    }
+                ),
+                max_inline_chars=0,
+            )
+        except Exception as exc:
+            SmartLogger.log(
+                "ERROR",
+                "neo4j_history.save_value_mapping.error",
+                category="neo4j.history.save_value_mapping",
+                params=sanitize_for_log(
+                    {
+                        "natural_value": natural_value,
+                        "code_value": code_value,
+                        "column_name": column_name,
+                        "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+                        "exception": repr(exc),
+                        "traceback": traceback.format_exc(),
+                    }
+                ),
+                max_inline_chars=0,
+            )
+            raise
     
     async def find_similar_queries_by_graph(
         self,

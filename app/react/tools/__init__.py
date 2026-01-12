@@ -1,4 +1,6 @@
 from typing import Any, Dict, List
+import time
+import traceback
 
 from .context import ToolContext
 from . import (
@@ -9,6 +11,8 @@ from . import (
     explain as explain_tool,
     find_similar_query as find_similar_query_tool,
 )
+from app.smart_logger import SmartLogger
+from app.react.utils.log_sanitize import sanitize_for_log
 
 
 class ToolExecutionError(Exception):
@@ -39,50 +43,96 @@ async def execute_tool(
 
     handler = TOOL_HANDLERS[tool_name]
 
-    if tool_name == "search_tables":
-        keywords: List[str] = parameters.get("keywords", [])
-        return await handler(context, keywords)
+    started = time.perf_counter()
+    SmartLogger.log(
+        "INFO",
+        "react.tool.call",
+        category="react.tool.call",
+        params=sanitize_for_log(
+            {
+                "react_run_id": context.react_run_id,
+                "tool_name": tool_name,
+                "parameters": parameters,
+            }
+        ),
+        # Store raw parameters for reproducibility in detail logs (when file_output enabled)
+        max_inline_chars=0,
+    )
 
-    if tool_name == "get_table_schema":
-        table_names: List[str] = parameters.get("table_names", [])
-        return await handler(context, table_names)
+    try:
+        if tool_name == "search_tables":
+            keywords: List[str] = parameters.get("keywords", [])
+            result = await handler(context, keywords)
+        elif tool_name == "get_table_schema":
+            table_names: List[str] = parameters.get("table_names", [])
+            result = await handler(context, table_names)
+        elif tool_name == "search_column_values":
+            table_name = parameters.get("table")
+            column_name = parameters.get("column")
+            schema_name = parameters.get("schema")
+            search_keywords: List[str] = parameters.get("search_keywords", [])
+            if not table_name or not column_name:
+                raise ToolExecutionError("table and column parameters are required")
+            result = await handler(
+                context,
+                table_name,
+                column_name,
+                search_keywords,
+                schema_name,
+            )
+        elif tool_name == "execute_sql_preview":
+            sql_text = parameters.get("sql")
+            if not sql_text:
+                raise ToolExecutionError("sql parameter is required")
+            result = await handler(context, sql_text)
+        elif tool_name == "explain":
+            sql_text = parameters.get("sql")
+            if not sql_text:
+                raise ToolExecutionError("sql parameter is required")
+            result = await handler(context, sql_text)
+        elif tool_name == "find_similar_query":
+            question = parameters.get("question")
+            min_similarity = parameters.get("min_similarity", 0.3)
+            if not question:
+                raise ToolExecutionError("question parameter is required")
+            result = await handler(context, question, min_similarity)
+        else:
+            raise ToolExecutionError(f"No handler implemented for tool: {tool_name}")
 
-    if tool_name == "search_column_values":
-        table_name = parameters.get("table")
-        column_name = parameters.get("column")
-        schema_name = parameters.get("schema")
-        search_keywords: List[str] = parameters.get("search_keywords", [])
-        if not table_name or not column_name:
-            raise ToolExecutionError("table and column parameters are required")
-        return await handler(
-            context,
-            table_name,
-            column_name,
-            search_keywords,
-            schema_name,
+        SmartLogger.log(
+            "INFO",
+            "react.tool.result",
+            category="react.tool.result",
+            params=sanitize_for_log(
+                {
+                    "react_run_id": context.react_run_id,
+                    "tool_name": tool_name,
+                    "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+                    # Keep raw tool output for reproducibility (saved to detail file when enabled).
+                    "tool_result": result,
+                }
+            ),
+            max_inline_chars=0,
         )
-
-    if tool_name == "execute_sql_preview":
-        sql_text = parameters.get("sql")
-        if not sql_text:
-            raise ToolExecutionError("sql parameter is required")
-        return await handler(context, sql_text)
-    
-    if tool_name == "explain":
-        sql_text = parameters.get("sql")
-        if not sql_text:
-            raise ToolExecutionError("sql parameter is required")
-        return await handler(context, sql_text)
-    
-    if tool_name == "find_similar_query":
-        question = parameters.get("question")
-        min_similarity = parameters.get("min_similarity", 0.3)
-        if not question:
-            raise ToolExecutionError("question parameter is required")
-        return await handler(context, question, min_similarity)
-
-    raise ToolExecutionError(f"No handler implemented for tool: {tool_name}")
-
+        return result
+    except Exception as exc:
+        SmartLogger.log(
+            "ERROR",
+            "react.tool.error",
+            category="react.tool.error",
+            params=sanitize_for_log(
+                {
+                    "react_run_id": context.react_run_id,
+                    "tool_name": tool_name,
+                    "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+                    "parameters": parameters,
+                    "exception": repr(exc),
+                    "traceback": traceback.format_exc(),
+                }
+            ),
+            max_inline_chars=0,
+        )
+        raise
 
 __all__ = [
     "ToolContext",

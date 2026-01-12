@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     previous_reasoning_limit_steps: int = 15
     is_add_mocked_db_caution: bool = False
     explain_analysis_timeout_seconds: int = 10
+    react_caching_db_type: str = "oracle"
     
     # Target Database
     target_db_type: Literal["postgresql", "mysql", "oracle"] = "postgresql"
@@ -54,6 +55,10 @@ class Settings(BaseSettings):
     vector_top_k: int = 10
     max_fk_hops: int = 3
     embedding_dimension: int = 1536
+
+    # Cache postprocess background jobs (in-process)
+    cache_postprocess_worker_count: int = 1
+    cache_postprocess_queue_maxsize: int = 200
     
     # Logging
     log_level: str = "INFO"

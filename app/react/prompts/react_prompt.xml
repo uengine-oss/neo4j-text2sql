@@ -262,7 +262,7 @@
 					</parameters>
 					<returns>
 						<return_item>similar_queries: Past queries with SQL templates and execution stats</return_item>
-						<return_item>value_mappings: Natural language → code mappings (e.g., "강릉" → "BPLC006")</return_item>
+						<return_item>value_mappings: Natural language → code mappings (e.g., "강릉" → "CODE123")</return_item>
 						<return_item>action_required: IMMEDIATE_TEMPLATE_REUSE (>=80%) or ADAPT_TEMPLATE (>=50%)</return_item>
 					</returns>
 					<critical_behavior>
@@ -282,7 +282,7 @@
 					</critical_behavior>
 					<value_mapping_usage>
 						CRITICAL: When value_mappings are provided, USE THEM IMMEDIATELY!
-						Example: If value_mappings shows "강릉" → "BPLC006", use BPLC006 in WHERE clause.
+						Example: If value_mappings shows "강릉" → "CODE123", use CODE123 in WHERE clause.
 						Do NOT search for values that are already provided in value_mappings.
 					</value_mapping_usage>
 					<usage_tip>Use this FIRST before exploring schema. If action_required is IMMEDIATE_TEMPLATE_REUSE, you can complete the query in just 3 steps: find_similar_query → explain → submit_sql</usage_tip>
@@ -359,7 +359,7 @@
 					<critical_path action="IMMEDIATE_TEMPLATE_REUSE">
 						When action_required = IMMEDIATE_TEMPLATE_REUSE (similarity >= 80%):
 						1. Take the SQL template from similar_queries
-						2. Apply value_mappings to replace WHERE clause values (e.g., "강릉" → "BPLC006")
+						2. Apply value_mappings to replace WHERE clause values (e.g., "강릉" → "CODE123")
 						3. SKIP steps 2-5 entirely
 						4. Go directly to step 6 (explain) with the modified SQL
 						5. Then submit_sql - complete in just 3 tool calls!
@@ -387,7 +387,7 @@
 				</step>
 				<step id="5">
 					<action>Verify Values (Skip if value_mappings provided)</action>
-					<detail>Use search_column_values only if value_mappings did NOT provide the needed value. If find_similar_query already provided value_mappings (e.g., "강릉" → "BPLC006"), USE THOSE VALUES directly without additional search.</detail>
+					<detail>Use search_column_values only if value_mappings did NOT provide the needed value. If find_similar_query already provided value_mappings (e.g., "강릉" → "CODE123"), USE THOSE VALUES directly without additional search.</detail>
 				</step>
 				<step id="6">
 					<action>Analyze Performance</action>

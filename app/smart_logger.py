@@ -170,10 +170,13 @@ class SmartLogger:
         filepath = os.path.join(self.detail_log_dir, filename)
         
         try:
-            if self.file_output:
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    # Keep raw text whenever possible; fall back to `str()` for non-JSON types.
-                    json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+            # If file output is disabled, do not pretend we created a file.
+            if not self.file_output:
+                return None
+
+            with open(filepath, 'w', encoding='utf-8') as f:
+                # Keep raw text whenever possible; fall back to `str()` for non-JSON types.
+                json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
             return filename
         except Exception as e:
             return f"Error saving detail: {str(e)}"
@@ -230,8 +233,11 @@ class SmartLogger:
                 trace_id = self._generate_unique_trace_id()
                 detail_filename = self._save_detail_payload(trace_id, params)
                 
-                if detail_filename.startswith("Error"):
+                if isinstance(detail_filename, str) and detail_filename.startswith("Error"):
                     log_entry["detail_save_error"] = detail_filename
+                elif detail_filename is None:
+                    # file_output is disabled; fall back to lightweight summary without pointing to a non-existent file.
+                    log_entry["detail_save_error"] = "file_output_disabled"
                 else:
                     log_entry["has_detail_file"] = True
                     log_entry["detail_ref"] = detail_filename

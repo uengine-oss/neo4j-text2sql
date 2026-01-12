@@ -21,7 +21,6 @@ from app.react.tools import ToolContext
 from app.react.streaming_xml_sections import StreamingXmlSectionsExtractor
 from app.react.utils.log_sanitize import sanitize_for_log
 from app.smart_logger import SmartLogger
-from app.models.neo4j_history import Neo4jQueryRepository
 
 
 router = APIRouter(prefix="/react", tags=["ReAct"])
@@ -510,45 +509,40 @@ async def run_react(
                         question_to_user=None,
                         warnings=warnings or None,
                     )
-                    
-                    # Neo4j에 쿼리 히스토리 저장 (그래프 온톨로지)
+
+                    # Neo4j 캐싱/히스토리 저장은 유저 응답 이후 백그라운드에서 수행 (강한 게이트 포함)
                     try:
-                        neo4j_repo = Neo4jQueryRepository(neo4j_session)
-                        
-                        # 메타데이터를 딕셔너리로 변환
+                        from app.core.background_jobs import enqueue_cache_postprocess
+
                         metadata_dict = {
-                            'identified_tables': state.metadata.identified_tables,
-                            'identified_columns': state.metadata.identified_columns,
-                            'identified_values': state.metadata.identified_values,
-                            'identified_relationships': state.metadata.identified_relationships,
-                            'identified_constraints': state.metadata.identified_constraints,
+                            "identified_tables": state.metadata.identified_tables,
+                            "identified_columns": state.metadata.identified_columns,
+                            "identified_values": state.metadata.identified_values,
+                            "identified_relationships": state.metadata.identified_relationships,
+                            "identified_constraints": state.metadata.identified_constraints,
                         }
-                        
-                        # steps를 저장용 딕셔너리 리스트로 변환
                         steps_for_save = [step.model_dump() for step in steps] if steps else []
-                        
-                        await neo4j_repo.save_query(
-                            question=request.question,
-                            sql=validated_sql or final_sql,
-                            status="completed",
-                            metadata=metadata_dict,
-                            row_count=execution_result.row_count if execution_result else None,
-                            execution_time_ms=execution_result.execution_time_ms if execution_result else None,
-                            steps_count=len(steps),
-                            steps=steps_for_save,
+
+                        enqueue_cache_postprocess(
+                            {
+                                "react_run_id": react_run_id,
+                                "question": request.question,
+                                "final_sql": final_sql,
+                                "validated_sql": validated_sql,
+                                "status": "completed",
+                                "row_count": execution_result.row_count if execution_result else None,
+                                "execution_time_ms": execution_result.execution_time_ms if execution_result else None,
+                                "steps_count": len(steps),
+                                "metadata_dict": metadata_dict,
+                                "steps": steps_for_save,
+                            }
                         )
-                        SmartLogger.log(
-                            "INFO",
-                            "react.neo4j.saved",
-                            category="react.neo4j.saved",
-                            params={"react_run_id": react_run_id, "question": request.question[:100]},
-                        )
-                    except Exception as neo4j_err:
+                    except Exception as enqueue_err:
                         SmartLogger.log(
                             "WARNING",
-                            "react.neo4j.save_failed",
-                            category="react.neo4j.save_failed",
-                            params={"react_run_id": react_run_id, "error": str(neo4j_err)[:200]},
+                            "react.neo4j.enqueue_failed",
+                            category="react.neo4j.enqueue_failed",
+                            params={"react_run_id": react_run_id, "error": str(enqueue_err)[:200]},
                         )
                     
                     # 캐시에 결과 저장 (성공한 경우만)

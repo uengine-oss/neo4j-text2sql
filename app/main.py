@@ -10,6 +10,7 @@ from app.config import settings
 from app.deps import neo4j_conn
 from app.routers import ask, meta, feedback, ingest, react, vectorize, history, cache, direct_sql
 from app.smart_logger import SmartLogger
+from app.core.background_jobs import start_cache_postprocess_workers, stop_cache_postprocess_workers
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -28,11 +29,14 @@ async def lifespan(app: FastAPI):
         category="main.lifespan.start"
     )
 
+    # Background workers (best-effort)
+    await start_cache_postprocess_workers()
 
     yield
     
     # Shutdown
     print("🛑 Shutting down...")
+    await stop_cache_postprocess_workers()
     await neo4j_conn.close()
     print("✓ Neo4j connection closed")
 

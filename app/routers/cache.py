@@ -9,6 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.deps import get_neo4j_session, get_db_connection
+from app.smart_logger import SmartLogger
+from app.react.utils.log_sanitize import sanitize_for_log
 
 router = APIRouter(prefix="/cache", tags=["cache"])
 
@@ -589,6 +591,15 @@ async def delete_value_mapping(
     neo4j_session=Depends(get_neo4j_session)
 ):
     """잘못된 값 매핑 삭제"""
+    SmartLogger.log(
+        "INFO",
+        "cache.graph.value_mapping.delete.start",
+        category="cache.graph.value_mapping",
+        params=sanitize_for_log(
+            {"natural_value": natural_value, "code_value": code_value}
+        ),
+        max_inline_chars=0,
+    )
     if code_value:
         query = """
         MATCH (v:ValueMapping)
@@ -609,6 +620,19 @@ async def delete_value_mapping(
     
     record = await result.single()
     deleted_count = record['deleted'] if record else 0
+    SmartLogger.log(
+        "INFO",
+        "cache.graph.value_mapping.delete.done",
+        category="cache.graph.value_mapping",
+        params=sanitize_for_log(
+            {
+                "natural_value": natural_value,
+                "code_value": code_value,
+                "deleted_count": deleted_count,
+            }
+        ),
+        max_inline_chars=0,
+    )
     return {"message": f"Deleted {deleted_count} value mappings", "natural_value": natural_value}
 
 
@@ -620,6 +644,19 @@ async def create_value_mapping(
     neo4j_session=Depends(get_neo4j_session)
 ):
     """수동으로 값 매핑 생성"""
+    SmartLogger.log(
+        "INFO",
+        "cache.graph.value_mapping.create.start",
+        category="cache.graph.value_mapping",
+        params=sanitize_for_log(
+            {
+                "natural_value": natural_value,
+                "code_value": code_value,
+                "column_name": column_name,
+            }
+        ),
+        max_inline_chars=0,
+    )
     query = """
     MATCH (c:Column {name: $column_name})
     WITH c LIMIT 1
@@ -631,15 +668,47 @@ async def create_value_mapping(
     RETURN v.natural_value AS natural_value, v.code_value AS code_value, c.fqn AS column_fqn
     """
     
-    result = await neo4j_session.run(
-        query, 
-        natural_value=natural_value, 
-        code_value=code_value, 
-        column_name=column_name
-    )
-    record = await result.single()
+    try:
+        result = await neo4j_session.run(
+            query,
+            natural_value=natural_value,
+            code_value=code_value,
+            column_name=column_name,
+        )
+        record = await result.single()
+    except Exception as exc:
+        import traceback as _tb
+        SmartLogger.log(
+            "ERROR",
+            "cache.graph.value_mapping.create.error",
+            category="cache.graph.value_mapping",
+            params=sanitize_for_log(
+                {
+                    "natural_value": natural_value,
+                    "code_value": code_value,
+                    "column_name": column_name,
+                    "exception": repr(exc),
+                    "traceback": _tb.format_exc(),
+                }
+            ),
+            max_inline_chars=0,
+        )
+        raise
     
     if record:
+        SmartLogger.log(
+            "INFO",
+            "cache.graph.value_mapping.create.done",
+            category="cache.graph.value_mapping",
+            params=sanitize_for_log(
+                {
+                    "natural_value": record["natural_value"],
+                    "code_value": record["code_value"],
+                    "column_fqn": record["column_fqn"],
+                }
+            ),
+            max_inline_chars=0,
+        )
         return {
             "status": "created",
             "natural_value": record['natural_value'],
@@ -647,6 +716,20 @@ async def create_value_mapping(
             "column_fqn": record['column_fqn']
         }
     else:
+        SmartLogger.log(
+            "WARNING",
+            "cache.graph.value_mapping.create.not_found",
+            category="cache.graph.value_mapping",
+            params=sanitize_for_log(
+                {
+                    "natural_value": natural_value,
+                    "code_value": code_value,
+                    "column_name": column_name,
+                    "message": "Column not found",
+                }
+            ),
+            max_inline_chars=0,
+        )
         raise HTTPException(status_code=404, detail=f"Column {column_name} not found")
 
 
