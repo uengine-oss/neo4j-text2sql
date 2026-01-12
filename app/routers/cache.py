@@ -649,3 +649,33 @@ async def create_value_mapping(
     else:
         raise HTTPException(status_code=404, detail=f"Column {column_name} not found")
 
+
+# ============== LLM Query Cache API ==============
+
+@router.get("/llm/stats")
+async def get_llm_cache_stats():
+    """LLM 쿼리 캐시 통계 조회"""
+    from app.core.query_cache import get_query_cache
+    cache = get_query_cache()
+    return cache.get_stats()
+
+
+@router.delete("/llm/clear")
+async def clear_llm_cache():
+    """LLM 쿼리 캐시 전체 초기화"""
+    from app.core.query_cache import get_query_cache
+    cache = get_query_cache()
+    count = cache.clear()
+    return {"message": f"Cleared {count} cached items"}
+
+
+@router.delete("/llm/invalidate")
+async def invalidate_llm_cache(
+    question: str = Query(..., description="캐시에서 제거할 질문")
+):
+    """특정 질문의 LLM 캐시 무효화"""
+    from app.core.query_cache import get_query_cache
+    cache = get_query_cache()
+    removed = cache.invalidate(question)
+    return {"message": "Cache invalidated" if removed else "Not found in cache", "question": question}
+

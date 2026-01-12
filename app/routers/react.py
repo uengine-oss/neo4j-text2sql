@@ -102,6 +102,9 @@ class ReactRequest(BaseModel):
     debug_stream_xml_tokens: bool = Field(
         default=False, description="디버그용: raw XML 토큰 스트림을 그대로 전송할지 여부"
     )
+    use_cache: bool = Field(
+        default=True, description="동일한 질문에 대해 캐시된 결과를 사용할지 여부"
+    )
 
 
 def _step_to_model(step: ReactStep) -> ReactStepModel:
@@ -163,8 +166,59 @@ async def run_react(
     db_conn=Depends(get_db_connection),
     openai_client=Depends(get_openai_client),
 ) -> StreamingResponse:
+    from app.core.query_cache import get_query_cache
+    
     react_run_id = _new_react_run_id()
     api_started = time.perf_counter()
+    
+    # 캐시 확인 (새 세션이고 use_cache=True인 경우에만)
+    if request.use_cache and not request.session_state and not request.user_response:
+        cache = get_query_cache()
+        cached = cache.get(request.question)
+        
+        if cached:
+            # 캐시 히트: 빠르게 결과 반환
+            SmartLogger.log(
+                "INFO",
+                "react.cache.hit",
+                category="react.cache",
+                params={"question": request.question[:50], "hit_count": cached.hit_count},
+            )
+            
+            async def cached_event_iterator():
+                # 캐시 히트 알림
+                yield json.dumps({
+                    "event": "cache_hit",
+                    "message": "캐시된 결과를 반환합니다",
+                    "hit_count": cached.hit_count
+                }, ensure_ascii=False) + "\n"
+                
+                # 바로 완료 이벤트 전송 - "completed"로 통일, response 객체로 감싸서 프론트엔드와 호환
+                # execution_result는 이미 dict로 저장되어 있으므로 그대로 사용
+                response_obj = {
+                    "status": "completed",
+                    "final_sql": cached.final_sql,
+                    "validated_sql": cached.validated_sql,
+                    "execution_result": cached.execution_result,
+                    "steps": [],  # 캐시에서는 스텝 생략
+                    "collected_metadata": "",
+                    "partial_sql": cached.final_sql,
+                    "remaining_tool_calls": 0,
+                    "from_cache": True,
+                }
+                result_payload = {
+                    "event": "completed",
+                    "response": response_obj,
+                    "state": None,  # 캐시에서는 state 없음
+                }
+                yield json.dumps(result_payload, ensure_ascii=False) + "\n"
+            
+            return StreamingResponse(
+                cached_event_iterator(),
+                media_type="text/event-stream",
+                headers={"X-Cache-Hit": "true"}
+            )
+    
     state = _ensure_state_from_request(request)
 
     tool_context = ToolContext(
@@ -470,6 +524,9 @@ async def run_react(
                             'identified_constraints': state.metadata.identified_constraints,
                         }
                         
+                        # steps를 저장용 딕셔너리 리스트로 변환
+                        steps_for_save = [step.model_dump() for step in steps] if steps else []
+                        
                         await neo4j_repo.save_query(
                             question=request.question,
                             sql=validated_sql or final_sql,
@@ -478,6 +535,7 @@ async def run_react(
                             row_count=execution_result.row_count if execution_result else None,
                             execution_time_ms=execution_result.execution_time_ms if execution_result else None,
                             steps_count=len(steps),
+                            steps=steps_for_save,
                         )
                         SmartLogger.log(
                             "INFO",
@@ -492,6 +550,31 @@ async def run_react(
                             category="react.neo4j.save_failed",
                             params={"react_run_id": react_run_id, "error": str(neo4j_err)[:200]},
                         )
+                    
+                    # 캐시에 결과 저장 (성공한 경우만)
+                    if execution_result and request.use_cache:
+                        try:
+                            cache = get_query_cache()
+                            cache.put(
+                                question=request.question,
+                                final_sql=final_sql,
+                                validated_sql=validated_sql,
+                                execution_result=execution_result.model_dump() if execution_result else None,
+                                steps_summary=f"{len(steps)} steps completed"
+                            )
+                            SmartLogger.log(
+                                "INFO",
+                                "react.cache.saved",
+                                category="react.cache",
+                                params={"question": request.question[:50]},
+                            )
+                        except Exception as cache_err:
+                            SmartLogger.log(
+                                "WARNING",
+                                "react.cache.save_failed",
+                                category="react.cache",
+                                params={"error": str(cache_err)[:200]},
+                            )
                     
                     SmartLogger.log(
                         "INFO",

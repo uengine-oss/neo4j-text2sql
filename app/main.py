@@ -98,6 +98,10 @@ app.include_router(events.router, prefix="/text2sql")
 from app.routers import event_templates
 app.include_router(event_templates.router, prefix="/text2sql")
 
+# Include watch agent router
+from app.routers import watch_agent
+app.include_router(watch_agent.router, prefix="/text2sql")
+
 
 @app.get("/")
 async def root():

@@ -211,11 +211,16 @@ class Neo4jQueryRepository:
         row_count: Optional[int] = None,
         execution_time_ms: Optional[float] = None,
         steps_count: Optional[int] = None,
-        error_message: Optional[str] = None
+        error_message: Optional[str] = None,
+        steps: Optional[List[Dict]] = None  # 전체 도구 호출 과정
     ) -> str:
         """쿼리와 관련 메타데이터를 Neo4j에 저장"""
+        import json as json_module
         
         query_id = self._generate_query_id(question, sql)
+        
+        # steps를 JSON 문자열로 변환 (Neo4j에 저장하기 위해)
+        steps_json = json_module.dumps(steps, ensure_ascii=False) if steps else None
         
         # 1. Query 노드 생성 또는 업데이트
         query_create = """
@@ -227,6 +232,7 @@ class Neo4jQueryRepository:
             q.execution_time_ms = $execution_time_ms,
             q.steps_count = $steps_count,
             q.error_message = $error_message,
+            q.steps = $steps_json,
             q.updated_at = datetime(),
             q.created_at = COALESCE(q.created_at, datetime())
         RETURN q.id
@@ -241,7 +247,8 @@ class Neo4jQueryRepository:
             row_count=row_count,
             execution_time_ms=execution_time_ms,
             steps_count=steps_count,
-            error_message=error_message
+            error_message=error_message,
+            steps_json=steps_json
         )
         
         if sql:

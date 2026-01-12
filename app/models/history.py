@@ -27,6 +27,9 @@ class QueryHistory(BaseModel):
     
     # Additional metadata
     metadata: Optional[Dict[str, Any]] = None
+    
+    # Full steps detail - 도구 호출의 전체 과정
+    steps: Optional[List[Dict[str, Any]]] = None
 
 
 class QueryHistoryCreate(BaseModel):
@@ -41,6 +44,7 @@ class QueryHistoryCreate(BaseModel):
     steps_count: Optional[int] = None
     execution_time_ms: Optional[float] = None
     metadata: Optional[Dict[str, Any]] = None
+    steps: Optional[List[Dict[str, Any]]] = None  # 전체 도구 호출 과정
 
 
 class QueryHistoryResponse(BaseModel):
@@ -78,6 +82,7 @@ class HistoryRepository:
                 steps_count INTEGER,
                 execution_time_ms REAL,
                 metadata TEXT,
+                steps TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
@@ -89,25 +94,63 @@ class HistoryRepository:
             ON query_history(created_at DESC)
         """)
         
+        # Migration: Add steps column if not exists
+        cursor.execute("PRAGMA table_info(query_history)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'steps' not in columns:
+            cursor.execute("ALTER TABLE query_history ADD COLUMN steps TEXT")
+        
         conn.commit()
         conn.close()
     
     def _row_to_model(self, row: tuple) -> QueryHistory:
         """Convert SQLite row to QueryHistory model"""
+        # Column order (after ALTER TABLE ADD steps):
+        # 0:id, 1:question, 2:final_sql, 3:validated_sql, 4:execution_result,
+        # 5:row_count, 6:status, 7:error_message, 8:steps_count, 9:execution_time_ms,
+        # 10:metadata, 11:created_at, 12:updated_at, 13:steps
+        
+        steps = None
+        created_at = row[11] if len(row) > 11 else None
+        updated_at = row[12] if len(row) > 12 else None
+        
+        # steps는 ALTER TABLE로 추가되어 마지막(인덱스 13)에 있음
+        if len(row) > 13 and row[13]:
+            try:
+                steps = json.loads(row[13])
+            except (json.JSONDecodeError, TypeError):
+                steps = None
+        
+        # execution_result와 metadata도 안전하게 파싱
+        execution_result = None
+        if row[4]:
+            try:
+                execution_result = json.loads(row[4])
+            except (json.JSONDecodeError, TypeError):
+                execution_result = None
+        
+        metadata = None
+        if row[10]:
+            try:
+                metadata = json.loads(row[10])
+            except (json.JSONDecodeError, TypeError):
+                metadata = None
+        
         return QueryHistory(
             id=row[0],
             question=row[1],
             final_sql=row[2],
             validated_sql=row[3],
-            execution_result=json.loads(row[4]) if row[4] else None,
+            execution_result=execution_result,
             row_count=row[5],
             status=row[6],
             error_message=row[7],
             steps_count=row[8],
             execution_time_ms=row[9],
-            metadata=json.loads(row[10]) if row[10] else None,
-            created_at=row[11],
-            updated_at=row[12]
+            metadata=metadata,
+            steps=steps,
+            created_at=created_at,
+            updated_at=updated_at
         )
     
     def create(self, entry: QueryHistoryCreate) -> QueryHistory:
@@ -121,8 +164,8 @@ class HistoryRepository:
             INSERT INTO query_history 
             (question, final_sql, validated_sql, execution_result, row_count, 
              status, error_message, steps_count, execution_time_ms, metadata,
-             created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             steps, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             entry.question,
             entry.final_sql,
@@ -134,6 +177,7 @@ class HistoryRepository:
             entry.steps_count,
             entry.execution_time_ms,
             json.dumps(entry.metadata) if entry.metadata else None,
+            json.dumps(entry.steps) if entry.steps else None,
             now,
             now
         ))
